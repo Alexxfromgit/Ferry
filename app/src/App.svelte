@@ -19,6 +19,13 @@
     return initUpdates();
   });
 
+  /** What a drop would do, shown on the overlay and announced to screen readers. */
+  const drop = $derived(
+    app.dragKind === "tickets"
+      ? { title: "Drop to open the ticket", detail: "Ferry shows what's inside before anything downloads." }
+      : { title: "Drop to make a ticket", detail: "The files stay where they are. Ferry shares them from this computer." },
+  );
+
   /** The mascot is the illustration on an empty screen and recedes once content covers her. */
   const sceneMode = $derived.by<SceneMode>(() => {
     if (app.dragging) return "drop";
@@ -87,7 +94,7 @@
   </g>
 </svg>
 
-{#if app.showArtwork}
+{#if app.showArtwork === true}
   <Scene mode={sceneMode} />
 {/if}
 
@@ -146,21 +153,21 @@
 </div>
 
 {#if app.dragging}
-  <!-- Shown while files are dragged over the window; the drop itself goes to Tauri. -->
-  <div class="drop" class:artwork={app.showArtwork} transition:fade={{ duration: motion(150) }} aria-hidden="true">
+  <!-- Shown while files are dragged over the window; the drop itself goes to Tauri. Screen
+       readers get the same words from the live region below, so this copy is hidden from them. -->
+  <div class="drop" class:artwork={app.showArtwork === true} transition:fade={{ duration: motion(150) }} aria-hidden="true">
     <div class="drop-words">
-      <p class="drop-title">{app.dragKind === "tickets" ? "Drop to open the ticket" : "Drop to make a ticket"}</p>
-      <p class="muted">
-        {app.dragKind === "tickets"
-          ? "Ferry shows what's inside before anything downloads."
-          : "The files stay where they are. Ferry shares them from this computer."}
-      </p>
+      <p class="drop-title">{drop.title}</p>
+      <p class="muted">{drop.detail}</p>
     </div>
   </div>
 {/if}
 
+<!-- Always mounted: a live region added together with its text is often not announced. -->
+<p class="sr-only" role="status">{app.dragging ? `${drop.title}. ${drop.detail}` : ""}</p>
+
 {#if !app.ready}
-  <Splash artwork={app.showArtwork} />
+  <Splash artwork={app.showArtwork === true} />
 {/if}
 
 <style>

@@ -55,8 +55,8 @@
   </h2>
   {#if app.shares.length === 0}
     <!-- With the artwork on, the mascot behind the page is this screen's illustration. -->
-    <div class="empty" class:glass={!app.showArtwork} class:bare={app.showArtwork}>
-      {#if !app.showArtwork}
+    <div class="empty" class:glass={app.showArtwork === false} class:bare={app.showArtwork !== false}>
+      {#if app.showArtwork === false}
         <img src="/ferry-icon.png" alt="" width="96" height="96" />
       {/if}
       <p class="muted">

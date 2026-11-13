@@ -13,41 +13,36 @@
   });
 </script>
 
-<!-- Covers the UI while Ferry starts; the parent removes it once init finishes. -->
-<div class="splash" out:fade={{ duration: motion(300) }}>
-  {#if visible}
-    <div class="inner" class:artwork transition:fade={{ duration: motion(250) }}>
-      {#if artwork}
-        <img src="/art/scene-square.webp" alt="" aria-hidden="true" />
+<!-- Covers the UI while Ferry starts; the parent removes it once init finishes. Nothing is
+     mounted before the delay, so a fast start leaves the UI untouched. `global` lets the fade-out
+     play when the parent removes this component, not only when `visible` changes. -->
+{#if visible}
+  <div class="splash" class:artwork transition:fade|global={{ duration: motion(300) }}>
+    {#if artwork}
+      <img src="/art/scene-square.webp" alt="" aria-hidden="true" />
+    {/if}
+    <div class="words" role="status">
+      {#if !artwork}
+        <img class="icon" src="/ferry-icon.png" alt="" width="72" height="72" />
       {/if}
-      <div class="words" role="status">
-        {#if !artwork}
-          <img class="icon" src="/ferry-icon.png" alt="" width="72" height="72" />
-        {/if}
-        <p class="mark">Ferry</p>
-        <p class="muted">Getting your node ready…</p>
-        <div class="bar indeterminate" aria-hidden="true"><span></span></div>
-      </div>
+      <p class="mark">Ferry</p>
+      <p class="muted">Getting your node ready…</p>
+      <div class="bar indeterminate" aria-hidden="true"><span></span></div>
     </div>
-  {/if}
-</div>
+  </div>
+{/if}
 
 <style>
   .splash {
     position: fixed;
     inset: 0;
     z-index: 10;
+    display: grid;
+    place-items: center;
     background: var(--night);
   }
 
-  .inner {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-  }
-
-  .inner > img {
+  .splash > img {
     position: absolute;
     inset: 0;
     width: 100%;

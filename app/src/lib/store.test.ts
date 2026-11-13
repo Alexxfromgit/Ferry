@@ -252,4 +252,36 @@ describe("artwork", () => {
     const { app } = await freshStore();
     expect(app.showArtwork).toBe(false);
   });
+
+  it("stays unknown until settings load, and init waits for them", async () => {
+    let release!: () => void;
+    const loaded = new Promise<void>((done) => (release = done));
+    backend.get_settings = async () => {
+      await loaded;
+      return { downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: false };
+    };
+    vi.resetModules();
+    const { app, init } = await import("./store.svelte");
+    let finished = false;
+    const started = init().then(() => (finished = true));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(app.showArtwork).toBeNull();
+    expect(finished).toBe(false);
+    release();
+    await started;
+    expect(app.showArtwork).toBe(false);
+  });
+
+  it("falls back to showing artwork when settings can't be read, even if startup fails", async () => {
+    backend.get_settings = () => {
+      throw new Error("unreadable");
+    };
+    backend.list_shares = () => {
+      throw new Error("node down");
+    };
+    vi.resetModules();
+    const { app, init } = await import("./store.svelte");
+    await expect(init()).rejects.toThrow("node down");
+    expect(app.showArtwork).toBe(true);
+  });
 });

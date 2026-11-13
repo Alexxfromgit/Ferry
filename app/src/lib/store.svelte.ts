@@ -30,8 +30,9 @@ export const app = $state({
   dragKind: "files" as DragKind,
   /** False until `init` has finished, while the startup splash shows. */
   ready: false,
-  /** Mirrors the saved setting, so the backdrop can follow it without reloading settings. */
-  showArtwork: true,
+  /** Mirrors the saved setting, so the backdrop can follow it without reloading settings.
+   *  Null until it has loaded, so artwork never shows to someone who turned it off. */
+  showArtwork: null as boolean | null,
   toast: null as { text: string; error: boolean } | null,
   /** Bumped when share links may have changed (e.g. the relay connected); QR codes refetch. */
   linkEpoch: 0,
@@ -241,11 +242,27 @@ async function refreshStatus() {
   }
 }
 
+/** Loads the artwork setting. If settings can't be read, the default (on) applies. */
+async function loadArtworkSetting() {
+  try {
+    app.showArtwork = (await api.getSettings()).showArtwork;
+  } catch {
+    app.showArtwork = true;
+  }
+}
+
 export async function init() {
-  void api
-    .getSettings()
-    .then((s) => (app.showArtwork = s.showArtwork))
-    .catch(() => {});
+  // Started first so it runs alongside the rest, and awaited even if the rest fails: the
+  // splash and backdrop must not settle before the saved setting is known.
+  const artworkSetting = loadArtworkSetting();
+  try {
+    await initRest();
+  } finally {
+    await artworkSetting;
+  }
+}
+
+async function initRest() {
   await listen<FerryEvent>("ferry-event", (e) => onEvent(e.payload));
   await listen("ferry-open-link", () => void takeIncoming());
   await listen("ferry-resync", () => void resync());
