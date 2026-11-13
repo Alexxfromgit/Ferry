@@ -12,7 +12,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 use ferry_core::{
     ConnectionKind, DownloadInfo, DownloadStatus, Event, FileEntry, NodeStatus, Preview,
-    RelayChoice, ShareInfo, SkipReason, SkippedItem,
+    ReceiverProgress, RelayChoice, ShareInfo, SkipReason, SkippedItem,
 };
 use serde::Serialize;
 
@@ -48,6 +48,7 @@ fn share(full: bool) -> ShareInfo {
             Vec::new()
         },
         skipped_count: if full { 5 } else { 0 },
+        paused: full,
     }
 }
 
@@ -99,10 +100,30 @@ fn generate() -> String {
         Event::ShareRemoved {
             share_id: "a9cf".repeat(16),
         },
+        Event::ShareUpdated {
+            share: share(false),
+        },
         Event::ShareActivity {
             share_id: "a9cf".repeat(16),
             active_peers: 1,
             uploaded_bytes: 10,
+            bytes_per_sec: 5,
+            receivers: vec![
+                ReceiverProgress {
+                    id: 3,
+                    done_bytes: 10,
+                    total_bytes: 42,
+                    bytes_per_sec: 5,
+                    eta_secs: Some(7),
+                },
+                ReceiverProgress {
+                    id: 4,
+                    done_bytes: 0,
+                    total_bytes: 42,
+                    bytes_per_sec: 0,
+                    eta_secs: None,
+                },
+            ],
         },
         Event::DownloadUpdated {
             download: download(DownloadStatus::Downloading, true),

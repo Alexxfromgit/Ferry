@@ -37,6 +37,27 @@ const shares: ShareInfo[] = [
     link: "ferry://get?t=blobaafakesecond",
     ticket: "blobaafakesecond",
   },
+  {
+    id: hex(8),
+    name: "Old build",
+    sourcePaths: ["C:\\Users\\alex\\Projects\\build"],
+    fileCount: 12,
+    totalSize: 838_000_000,
+    createdAt: now - 86400 * 9,
+    link: "ferry://get?t=blobaafakethird",
+    ticket: "blobaafakethird",
+    paused: true,
+  },
+  ...Array.from({ length: 8 }, (_, i): ShareInfo => ({
+    id: `${hex(10 + i).slice(0, 56)}5ca9${String(i).padStart(4, "0")}`,
+    name: `Scan ${String(i + 1).padStart(2, "0")}.pdf`,
+    sourcePaths: [`C:\\Users\\alex\\Documents\\Scan ${i + 1}.pdf`],
+    fileCount: 1,
+    totalSize: 1_200_000 + i * 310_000,
+    createdAt: now - 86400 * (10 + i),
+    link: `ferry://get?t=blobaafake${i}`,
+    ticket: `blobaafake${i}`,
+  })),
 ];
 
 const downloads: DownloadInfo[] = [
@@ -102,6 +123,15 @@ export function installDevPreview() {
         case "node_status":
           if (slow) return new Promise((done) => setTimeout(() => done(status), 2000));
           return status;
+        case "set_share_paused": {
+          const { id, paused } = args as { id: string; paused: boolean };
+          const share = shares.find((s) => s.id === id);
+          if (!share) throw "unknown share";
+          if (!paused && share.name === "Old build") throw "Old build/app.exe was moved, deleted or changed since this ticket was made";
+          share.paused = paused;
+          setTimeout(() => void emit("ferry-event", { type: "shareUpdated", share: { ...share } }));
+          return share;
+        }
         case "list_shares":
           return empty ? [] : shares;
         case "list_downloads":
@@ -140,13 +170,22 @@ export function installDevPreview() {
     { shouldMockEvents: true },
   );
 
-  // One share has someone downloading right now.
-  setTimeout(() => {
+  // One share has two people downloading right now; their progress moves along.
+  let tick = 0;
+  setInterval(() => {
+    tick++;
+    const a = Math.min(621_600_000, 214_000_000 + tick * 2_100_000);
+    const b = Math.min(310_000_000, 18_000_000 + tick * 900_000);
     void emit("ferry-event", {
       type: "shareActivity",
       shareId: shares[0].id,
-      activePeers: 1,
-      uploadedBytes: 214_000_000,
+      activePeers: 2,
+      uploadedBytes: a + b,
+      bytesPerSec: 6_000_000,
+      receivers: [
+        { id: 1, doneBytes: a, totalBytes: 621_600_000, bytesPerSec: 4_200_000, etaSecs: Math.round((621_600_000 - a) / 4_200_000) },
+        { id: 2, doneBytes: b, totalBytes: 310_000_000, bytesPerSec: 1_800_000, etaSecs: Math.round((310_000_000 - b) / 1_800_000) },
+      ],
     });
-  }, 600);
+  }, 500);
 }

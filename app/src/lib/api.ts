@@ -11,6 +11,8 @@ export const api = {
   getShare: (id: string) => invoke<ShareInfo>("get_share", { id }),
   createShare: (paths: string[]) => invoke<ShareInfo>("create_share", { paths }),
   removeShare: (id: string) => invoke<void>("remove_share", { id }),
+  /** Turn a share off (paused) or back on; turning on fails if its files changed. */
+  setSharePaused: (id: string, paused: boolean) => invoke<ShareInfo>("set_share_paused", { id, paused }),
   saveShareFile: (id: string, path: string, password?: string) =>
     invoke<void>("save_share_file", { id, path, password: password ?? null }),
   shareQr: (id: string) => invoke<string>("share_qr", { id }),

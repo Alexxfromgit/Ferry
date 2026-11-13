@@ -27,6 +27,27 @@ export interface ShareInfo {
   /** Up to 100 items left out of the share; `skippedCount` is the full number. */
   skipped?: SkippedItem[];
   skippedCount?: number;
+  /** Turned off: not served, but kept so it can be turned on again. */
+  paused?: boolean;
+}
+
+/** How far one receiver of a share has got, as seen by the sender. */
+export interface ReceiverProgress {
+  /** Stable for the life of the transfer. */
+  id: number;
+  doneBytes: number;
+  /** What this transfer asked for; a resumed download only asks for what it is missing. */
+  totalBytes: number;
+  bytesPerSec: number;
+  etaSecs?: number;
+}
+
+/** Upload activity of one share. */
+export interface ShareActivity {
+  activePeers: number;
+  uploadedBytes: number;
+  bytesPerSec: number;
+  receivers: ReceiverProgress[];
 }
 
 export type DownloadStatus =
@@ -94,6 +115,7 @@ export type FerryEvent =
   | { type: "importProgress"; opId: number; doneBytes: number; totalBytes: number; currentFile: string }
   | { type: "shareCreated"; share: ShareInfo }
   | { type: "shareRemoved"; shareId: string }
-  | { type: "shareActivity"; shareId: string; activePeers: number; uploadedBytes: number }
+  | { type: "shareUpdated"; share: ShareInfo }
+  | ({ type: "shareActivity"; shareId: string } & ShareActivity)
   | { type: "downloadUpdated"; download: DownloadInfo }
   | { type: "downloadRemoved"; downloadId: string };

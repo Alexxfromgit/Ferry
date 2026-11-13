@@ -8,7 +8,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -48,6 +48,7 @@ use crate::{
         DownloadInfo, DownloadStatus, FileLists, MAX_SKIPPED_LISTED, Registry, ShareInfo,
         SkipReason, SkippedItem,
     },
+    speed::SpeedMeter,
     util,
 };
 
@@ -220,10 +221,13 @@ impl Node {
                 tracing::warn!(%id, "could not move a share's file list: {e:#}");
             }
         }
-        let provider = Arc::new(ProviderState::default());
+        let provider = Arc::new(ProviderState::new(file_lists.clone()));
         registry.shares.retain(|share| match parse_id(&share.id) {
             Ok((hash, _)) => {
-                provider.allow(hash);
+                if !share.paused {
+                    // File sizes are read from the share's list when first needed.
+                    provider.allow(hash, share.total_size, None);
+                }
                 true
             }
             Err(_) => {
@@ -587,6 +591,7 @@ impl Node {
             ticket: String::new(),
             skipped: skipped.items,
             skipped_count: skipped.count,
+            paused: false,
         };
         if share.skipped_count > 0 {
             tracing::info!(count = share.skipped_count, "items left out of the share");
@@ -597,12 +602,18 @@ impl Node {
             .write(&share.id, &files)
             .context("saving the share's file list")?;
         {
+            // Registry and serving change together, under the registry lock, as in
+            // `remove_share` and `set_share_paused`.
             let mut registry = self.inner.registry.lock().unwrap();
             registry.shares.retain(|s| s.id != share.id);
             registry.shares.push(share.clone());
+            self.inner.provider.allow(
+                hash,
+                share.total_size,
+                Some(files.iter().map(|f| f.size).collect()),
+            );
         }
         self.persist();
-        self.inner.provider.allow(hash);
         let share = self.with_link(share);
         self.emit(Event::ShareCreated {
             share: share.clone(),
@@ -645,22 +656,73 @@ impl Node {
     /// The original files are left untouched.
     pub async fn remove_share(&self, id: &str) -> anyhow::Result<()> {
         let (hash, id) = parse_id(id).context("invalid share id")?;
-        anyhow::ensure!(
-            self.inner.registry.lock().unwrap().share(&id).is_some(),
-            "unknown share"
-        );
-        self.inner.provider.disallow(&hash);
-        self.inner.store.tags().delete(share_tag(&hash)).await?;
-        self.inner
-            .registry
-            .lock()
-            .unwrap()
-            .shares
-            .retain(|s| s.id != id);
+        {
+            // Serving is stopped under the registry lock, so a share being turned on at the
+            // same time (see `set_share_paused`) can't start serving it again afterwards.
+            let mut registry = self.inner.registry.lock().unwrap();
+            anyhow::ensure!(registry.share(&id).is_some(), "unknown share");
+            registry.shares.retain(|s| s.id != id);
+            self.inner.provider.disallow(&hash);
+        }
         self.persist();
+        self.inner.store.tags().delete(share_tag(&hash)).await?;
         self.inner.file_lists.remove(&id);
         self.emit(Event::ShareRemoved { share_id: id });
         Ok(())
+    }
+
+    /// Turn a share off or back on. While it is off, requests are refused and running
+    /// transfers end, but the ticket stays valid: turning it on again serves the same link.
+    ///
+    /// Before a share is turned on, its files are checked (that each still exists with the
+    /// size it had), so a ticket never quietly serves files that were moved or replaced.
+    pub async fn set_share_paused(&self, id: &str, paused: bool) -> anyhow::Result<ShareInfo> {
+        let (hash, id) = parse_id(id).context("invalid share id")?;
+        let share = self
+            .inner
+            .registry
+            .lock()
+            .unwrap()
+            .share(&id)
+            .cloned()
+            .context("unknown share")?;
+        // Checking the files can take a while for big folders; it runs without holding locks.
+        let sizes = if paused {
+            None
+        } else {
+            let lists = self.inner.file_lists.clone();
+            let sources = share.source_paths.clone();
+            let list_id = id.clone();
+            let files = tokio::task::spawn_blocking(move || {
+                let files = lists.read(&list_id)?;
+                verify_sources(&sources, &files).map(|()| files)
+            })
+            .await??;
+            Some(files.iter().map(|f| f.size).collect())
+        };
+        let updated = {
+            // The share may have been removed (or changed) meanwhile; serving changes only
+            // together with the registry, under its lock.
+            let mut registry = self.inner.registry.lock().unwrap();
+            let entry = registry
+                .shares
+                .iter_mut()
+                .find(|s| s.id == id)
+                .context("this ticket was removed")?;
+            entry.paused = paused;
+            if paused {
+                self.inner.provider.pause(&hash);
+            } else {
+                self.inner.provider.allow(hash, entry.total_size, sizes);
+            }
+            entry.clone()
+        };
+        self.persist();
+        let updated = self.with_link(updated);
+        self.emit(Event::ShareUpdated {
+            share: updated.clone(),
+        });
+        Ok(updated)
     }
 
     // ------------------------------------------------------------- downloads
@@ -974,7 +1036,7 @@ impl Node {
                 d.done_bytes = already;
             });
 
-            let mut meter = SpeedMeter::new(already);
+            let mut meter = SpeedMeter::new(already, PROGRESS_INTERVAL);
             let mut stream = store.remote().execute_get(conn, local.missing()).stream();
             while let Some(item) = stream.next().await {
                 match item {
@@ -1132,6 +1194,36 @@ fn selected_path(conn: &iroh::endpoint::Connection) -> Option<ConnectionKind> {
         .map(|p| connection_kind(p.is_relay()))
 }
 
+/// Check that every file of a share is still where it was shared from, as a regular file of
+/// the same size. Names are `/`-separated and start with the shared item's own name. Two
+/// shared folders can have the same name (their contents are merged), so a file may be in any
+/// of the places with that name.
+fn verify_sources(source_paths: &[PathBuf], files: &[FileEntry]) -> anyhow::Result<()> {
+    let mut roots: HashMap<String, Vec<&Path>> = HashMap::new();
+    for path in source_paths {
+        if let (Some(name), Some(parent)) = (path.file_name(), path.parent()) {
+            roots
+                .entry(name.to_string_lossy().into_owned())
+                .or_default()
+                .push(parent);
+        }
+    }
+    for file in files {
+        let top = file.name.split('/').next().unwrap_or_default();
+        let unchanged = roots.get(top).into_iter().flatten().any(|root| {
+            util::safe_join(root, &file.name)
+                .and_then(|path| Ok(path.symlink_metadata()?))
+                .is_ok_and(|meta| meta.is_file() && meta.len() == file.size)
+        });
+        anyhow::ensure!(
+            unchanged,
+            "{} was moved, deleted or changed since this ticket was made",
+            file.name
+        );
+    }
+    Ok(())
+}
+
 /// The top-level file or folder name, or "N items" when there are several.
 fn display_name<'a>(names: impl Iterator<Item = &'a str>) -> String {
     let tops: BTreeSet<&str> = names.map(|n| n.split('/').next().unwrap_or(n)).collect();
@@ -1158,48 +1250,6 @@ fn dunce_canonicalize(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(canonical)
 }
 
-/// Smoothed transfer speed and ETA. The first sample is reported right away, later ones at
-/// most every [`PROGRESS_INTERVAL`].
-struct SpeedMeter {
-    last_time: Instant,
-    last_bytes: u64,
-    speed: f64,
-    reported: bool,
-}
-
-impl SpeedMeter {
-    fn new(start_bytes: u64) -> Self {
-        Self {
-            last_time: Instant::now(),
-            last_bytes: start_bytes,
-            speed: 0.0,
-            reported: false,
-        }
-    }
-
-    fn sample(&mut self, done: u64, total: u64) -> Option<(u64, Option<u64>)> {
-        let elapsed = self.last_time.elapsed();
-        if self.reported && elapsed < PROGRESS_INTERVAL && done < total {
-            return None;
-        }
-        if elapsed < Duration::from_millis(1) {
-            return None; // too short to measure a speed
-        }
-        let instant = done.saturating_sub(self.last_bytes) as f64 / elapsed.as_secs_f64();
-        self.speed = if self.speed == 0.0 {
-            instant
-        } else {
-            0.7 * self.speed + 0.3 * instant
-        };
-        self.reported = true;
-        self.last_time = Instant::now();
-        self.last_bytes = done;
-        let eta = (self.speed >= 1.0)
-            .then(|| (total.saturating_sub(done) as f64 / self.speed).ceil() as u64);
-        Some((self.speed as u64, eta))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1217,6 +1267,59 @@ mod tests {
     }
 
     #[test]
+    fn sources_are_verified_before_a_share_is_turned_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("Holiday");
+        std::fs::create_dir_all(folder.join("day 1")).unwrap();
+        std::fs::write(folder.join("day 1/a.txt"), b"hello").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"abc").unwrap();
+        let sources = vec![folder.clone(), dir.path().join("b.txt")];
+        let files = vec![
+            FileEntry {
+                name: "Holiday/day 1/a.txt".into(),
+                size: 5,
+            },
+            FileEntry {
+                name: "b.txt".into(),
+                size: 3,
+            },
+        ];
+        verify_sources(&sources, &files).unwrap();
+
+        std::fs::write(dir.path().join("b.txt"), b"abcd").unwrap();
+        let err = verify_sources(&sources, &files).unwrap_err().to_string();
+        assert!(err.starts_with("b.txt was moved"), "{err}");
+
+        std::fs::write(dir.path().join("b.txt"), b"abc").unwrap();
+        std::fs::remove_file(folder.join("day 1/a.txt")).unwrap();
+        let err = verify_sources(&sources, &files).unwrap_err().to_string();
+        assert!(err.starts_with("Holiday/day 1/a.txt was moved"), "{err}");
+    }
+
+    #[test]
+    fn folders_with_the_same_name_are_both_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a/Photos"), dir.path().join("b/Photos"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("x.jpg"), b"xx").unwrap();
+        std::fs::write(b.join("y.jpg"), b"yyy").unwrap();
+        let files = vec![
+            FileEntry {
+                name: "Photos/x.jpg".into(),
+                size: 2,
+            },
+            FileEntry {
+                name: "Photos/y.jpg".into(),
+                size: 3,
+            },
+        ];
+        verify_sources(&[a.clone(), b], &files).unwrap();
+        std::fs::remove_file(a.join("x.jpg")).unwrap();
+        assert!(verify_sources(&[a, dir.path().join("b/Photos")], &files).is_err());
+    }
+
+    #[test]
     fn malformed_ids_are_errors_not_panics() {
         for bad in [
             "",
@@ -1231,14 +1334,5 @@ mod tests {
         let hash = Hash::new(b"x");
         let (_, from_hex) = parse_id(&hash.to_hex()).unwrap();
         assert_eq!(from_hex, hash.to_hex().to_string());
-    }
-
-    #[test]
-    fn speed_meter_never_reports_infinite_speed() {
-        let mut meter = SpeedMeter::new(0);
-        // Completion right away: elapsed is (nearly) zero.
-        if let Some((speed, _)) = meter.sample(100, 100) {
-            assert!(speed < u64::MAX);
-        }
     }
 }

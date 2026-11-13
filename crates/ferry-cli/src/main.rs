@@ -301,12 +301,20 @@ async fn serve(node: &Node) -> anyhow::Result<()> {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => return Ok(()),
             event = events.recv() => {
-                if let Ok(Event::ShareActivity { share_id, active_peers, uploaded_bytes }) = event {
+                if let Ok(Event::ShareActivity {
+                    share_id,
+                    active_peers,
+                    uploaded_bytes,
+                    bytes_per_sec,
+                    ..
+                }) = event
+                {
                     eprint!(
-                        "\r{}: {} peer(s) downloading, {} sent      ",
+                        "\r{}: {} peer(s) downloading, {} sent, {}/s      ",
                         &share_id[..8],
                         active_peers,
-                        human(uploaded_bytes)
+                        human(uploaded_bytes),
+                        human(bytes_per_sec)
                     );
                 }
             }

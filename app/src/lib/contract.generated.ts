@@ -36,7 +36,8 @@ export const shares = [{
       "reason": "notAFile"
     }
   ],
-  "skippedCount": 5
+  "skippedCount": 5,
+  "paused": true
 }, {
   "id": "a9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cf",
   "name": "Holiday",
@@ -180,7 +181,8 @@ export const events = [
           "reason": "notAFile"
         }
       ],
-      "skippedCount": 5
+      "skippedCount": 5,
+      "paused": true
     }
   },
   {
@@ -188,10 +190,41 @@ export const events = [
     "shareId": "a9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cf"
   },
   {
+    "type": "shareUpdated",
+    "share": {
+      "id": "a9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cf",
+      "name": "Holiday",
+      "sourcePaths": [
+        "/home/example/Holiday"
+      ],
+      "fileCount": 1,
+      "totalSize": 42,
+      "createdAt": 1794500000,
+      "link": "",
+      "ticket": ""
+    }
+  },
+  {
     "type": "shareActivity",
     "shareId": "a9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cfa9cf",
     "activePeers": 1,
-    "uploadedBytes": 10
+    "uploadedBytes": 10,
+    "bytesPerSec": 5,
+    "receivers": [
+      {
+        "id": 3,
+        "doneBytes": 10,
+        "totalBytes": 42,
+        "bytesPerSec": 5,
+        "etaSecs": 7
+      },
+      {
+        "id": 4,
+        "doneBytes": 0,
+        "totalBytes": 42,
+        "bytesPerSec": 0
+      }
+    ]
   },
   {
     "type": "downloadUpdated",

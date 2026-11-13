@@ -12,11 +12,12 @@ mod link;
 mod node;
 mod provider;
 mod registry;
+mod speed;
 mod ticket_file;
 mod util;
 
 pub use config::{Config, RelayChoice, validate_relay_url};
-pub use events::{ConnectionKind, Event};
+pub use events::{ConnectionKind, Event, ReceiverProgress};
 pub use link::{
     FileEntry, LINK_SCHEME, MAX_FILES_IN_SHARE_FILE, SHARE_FILE_EXTENSION, ShareFile, ShareLink,
 };

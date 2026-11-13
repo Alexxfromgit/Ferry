@@ -36,12 +36,19 @@ pub struct ShareInfo {
     pub skipped: Vec<SkippedItem>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub skipped_count: usize,
+    /// Turned off by the user: not served, but kept so it can be turned on again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub paused: bool,
 }
 
 pub const MAX_SKIPPED_LISTED: usize = 100;
 
 fn is_zero(n: &usize) -> bool {
     *n == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Why something in a shared selection was left out.
@@ -207,6 +214,7 @@ fn take_legacy_files(value: &mut serde_json::Value) -> LegacyFileLists {
 }
 
 /// Each share's full file list, one JSON file per share, written once when the share is made.
+#[derive(Clone)]
 pub struct FileLists {
     dir: PathBuf,
 }
@@ -301,6 +309,7 @@ mod size_probe {
                 ticket: String::new(),
                 skipped: Vec::new(),
                 skipped_count: 0,
+                paused: false,
             }],
             downloads: Vec::new(),
         };

@@ -18,12 +18,8 @@
     switch (d.status) {
       case "connecting":
         return "Contacting the sender…";
-      case "downloading": {
-        const parts = [`${bytes(d.doneBytes)} of ${bytes(d.totalBytes)}`];
-        if (d.bytesPerSec > 0) parts.push(`${bytes(d.bytesPerSec)}/s`);
-        if (d.etaSecs != null) parts.push(duration(d.etaSecs));
-        return parts.join(", ");
-      }
+      case "downloading":
+        return `${bytes(d.doneBytes)} of ${bytes(d.totalBytes)}`;
       case "exporting":
         return "Saving files…";
       case "completed":
@@ -36,6 +32,14 @@
   });
 
   const showBar = $derived(["downloading", "paused", "exporting"].includes(download.status));
+
+  /** Speed and time left, shown in their own column while downloading. */
+  const rate = $derived.by(() => {
+    const d = download;
+    if (d.status !== "downloading") return null;
+    const speed = d.bytesPerSec > 0 ? `↓ ${bytes(d.bytesPerSec)}/s` : "↓ stalled";
+    return d.etaSecs != null ? `${speed} · ${duration(d.etaSecs)}` : speed;
+  });
 
   async function act(fn: () => Promise<void>, failure: string) {
     try {
@@ -76,9 +80,24 @@
       {/if}
     </div>
     {#if showBar}
-      <div class="bar"><span style:width="{percent}%"></span></div>
+      <div class="progress">
+        <div
+          class="bar"
+          role="progressbar"
+          aria-label="{title} progress"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow={Math.round(percent)}
+        >
+          <span style:width="{percent}%"></span>
+        </div>
+        <span class="pct">{Math.floor(percent)}%</span>
+      </div>
     {/if}
-    <p class="detail" class:error={download.status === "failed"}>{detail}</p>
+    <div class="info">
+      <p class="detail" class:error={download.status === "failed"}>{detail}</p>
+      {#if rate}<p class="rate">{rate}</p>{/if}
+    </div>
   </div>
 
   <div class="actions">
@@ -146,9 +165,40 @@
     background: rgb(183 156 255 / 0.14);
   }
 
+  .progress {
+    display: grid;
+    grid-template-columns: 1fr 2.8rem;
+    align-items: center;
+    gap: 0.6rem;
+  }
+
+  .pct {
+    text-align: right;
+    font-size: var(--t-xs);
+    font-weight: 650;
+    font-variation-settings: var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .info {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    min-width: 0;
+  }
+
   .detail {
+    min-width: 0;
     font-size: var(--t-sm);
     color: var(--ink-soft);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .rate {
+    flex: none;
+    font-size: var(--t-sm);
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
   }
 
   .detail.error {
