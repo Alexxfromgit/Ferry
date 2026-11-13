@@ -1,0 +1,577 @@
+//! Ferry desktop shell: a thin Tauri layer over `ferry-core`.
+//!
+//! Commands map 1:1 to `Node` methods; core events are forwarded to the webview as
+//! `ferry-event`. Incoming links (`ferry://` deep links, `.ferry` files opened from the file
+//! manager, or a second app launch) are queued and announced with `ferry-open-link`. When the
+//! UI may have missed events, `ferry-resync` tells it to reload its lists.
+
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
+
+use ferry_core::{
+    Config, DownloadInfo, DownloadStatus, Event, Node, NodeStatus, Preview, RelayChoice,
+    SHARE_FILE_EXTENSION, ShareInfo, ShareLink,
+};
+use serde::{Deserialize, Serialize};
+use tauri::{
+    AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
+use tauri_plugin_deep_link::DeepLinkExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_opener::OpenerExt;
+
+const EVENT: &str = "ferry-event";
+const OPEN_LINK: &str = "ferry-open-link";
+const RESYNC: &str = "ferry-resync";
+/// `.ferry` files are small JSON; anything bigger is not one.
+const MAX_SHARE_FILE: u64 = 1024 * 1024;
+const MAX_LOG: u64 = 5 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Settings {
+    download_dir: PathBuf,
+    relay: RelayChoice,
+    close_to_tray: bool,
+}
+
+struct AppState {
+    node: Node,
+    settings: Mutex<Settings>,
+    settings_path: PathBuf,
+    pending_links: Mutex<Vec<String>>,
+}
+
+type CmdResult<T> = Result<T, String>;
+
+fn fail(e: impl Into<anyhow::Error>) -> String {
+    format!("{:#}", e.into())
+}
+
+fn load_settings(path: &Path, default_download_dir: PathBuf) -> Settings {
+    let defaults = Settings {
+        download_dir: default_download_dir,
+        relay: RelayChoice::Default,
+        close_to_tray: true,
+    };
+    let Some(mut settings) = std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Settings>(&bytes).ok())
+    else {
+        return defaults;
+    };
+    if !settings.download_dir.is_absolute() {
+        settings.download_dir = defaults.download_dir;
+    }
+    settings
+}
+
+/// Settings coming from the UI must be usable, so a typo can't break the next start.
+fn validate_settings(settings: &Settings) -> Result<(), String> {
+    settings.relay.validate().map_err(fail)?;
+    if !settings.download_dir.is_absolute() {
+        return Err("Choose a download folder with a full path.".into());
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------ commands
+
+#[tauri::command]
+fn node_status(state: State<'_, AppState>) -> NodeStatus {
+    state.node.status()
+}
+
+#[tauri::command]
+fn list_shares(state: State<'_, AppState>) -> Vec<ShareInfo> {
+    state.node.list_shares()
+}
+
+/// One share with a link built from the current addresses (call at the moment of copying).
+#[tauri::command]
+fn get_share(state: State<'_, AppState>, id: String) -> CmdResult<ShareInfo> {
+    state.node.share(&id).ok_or_else(|| "unknown share".into())
+}
+
+#[tauri::command]
+async fn create_share(state: State<'_, AppState>, paths: Vec<PathBuf>) -> CmdResult<ShareInfo> {
+    let node = state.node.clone();
+    node.create_share(paths).await.map_err(fail)
+}
+
+#[tauri::command]
+async fn remove_share(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let node = state.node.clone();
+    node.remove_share(&id).await.map_err(fail)
+}
+
+/// Write a `.ferry` file. The extension is always `.ferry`, whatever the path says.
+#[tauri::command]
+fn save_share_file(state: State<'_, AppState>, id: String, path: PathBuf) -> CmdResult<()> {
+    let file = state.node.share_file(&id).map_err(fail)?;
+    let has_ext = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(SHARE_FILE_EXTENSION));
+    let path = if has_ext {
+        path
+    } else {
+        let mut name = path.into_os_string();
+        name.push(format!(".{SHARE_FILE_EXTENSION}"));
+        PathBuf::from(name)
+    };
+    ferry_core::write_atomic(&path, file.to_json().as_bytes()).map_err(fail)
+}
+
+/// The share link as an SVG QR code, built from the current addresses.
+#[tauri::command]
+fn share_qr(state: State<'_, AppState>, id: String) -> CmdResult<String> {
+    let share = state.node.share(&id).ok_or("unknown share")?;
+    let code = qrcode::QrCode::new(share.link.as_bytes()).map_err(fail)?;
+    Ok(code
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(200, 200)
+        .quiet_zone(false)
+        .dark_color(qrcode::render::svg::Color("#2A0D20"))
+        .light_color(qrcode::render::svg::Color("#FFFFFF"))
+        .build())
+}
+
+/// Read a `.ferry` file chosen in the open dialog or dropped on the window.
+#[tauri::command]
+fn read_share_file(path: PathBuf) -> CmdResult<String> {
+    read_share_file_checked(&path)
+}
+
+fn read_share_file_checked(path: &Path) -> CmdResult<String> {
+    let is_share_file = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(SHARE_FILE_EXTENSION));
+    if !is_share_file {
+        return Err("That is not a Ferry ticket file (.ferry).".into());
+    }
+    let meta = std::fs::metadata(path).map_err(fail)?;
+    if !meta.is_file() || meta.len() > MAX_SHARE_FILE {
+        return Err("That file is too large to be a Ferry ticket.".into());
+    }
+    std::fs::read_to_string(path).map_err(fail)
+}
+
+#[tauri::command]
+async fn preview(state: State<'_, AppState>, link: String) -> CmdResult<Preview> {
+    let node = state.node.clone();
+    let link = ShareLink::parse(&link).map_err(fail)?;
+    node.preview(&link).await.map_err(fail)
+}
+
+#[tauri::command]
+fn list_downloads(state: State<'_, AppState>) -> Vec<DownloadInfo> {
+    state.node.list_downloads()
+}
+
+#[tauri::command]
+async fn start_download(
+    state: State<'_, AppState>,
+    link: String,
+    dest: Option<PathBuf>,
+) -> CmdResult<DownloadInfo> {
+    let node = state.node.clone();
+    let dest = dest.unwrap_or_else(|| state.settings.lock().unwrap().download_dir.clone());
+    let link = ShareLink::parse(&link).map_err(fail)?;
+    node.start_download(&link, dest).await.map_err(fail)
+}
+
+#[tauri::command]
+fn pause_download(state: State<'_, AppState>, id: String) {
+    state.node.pause_download(&id);
+}
+
+#[tauri::command]
+async fn resume_download(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let node = state.node.clone();
+    node.resume_download(&id).await.map_err(fail)
+}
+
+#[tauri::command]
+async fn remove_download(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let node = state.node.clone();
+    node.remove_download(&id).await.map_err(fail)
+}
+
+/// Show a finished download in the file manager. Only paths of known downloads are accepted.
+#[tauri::command]
+fn reveal_download(app: AppHandle, state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    let path = state
+        .node
+        .download(&id)
+        .and_then(|d| d.saved_path)
+        .ok_or("This download has not been saved yet.")?;
+    app.opener().reveal_item_in_dir(path).map_err(fail)
+}
+
+#[tauri::command]
+fn get_settings(state: State<'_, AppState>) -> Settings {
+    state.settings.lock().unwrap().clone()
+}
+
+/// Save settings. Returns `true` when a restart is needed for them to take effect.
+#[tauri::command]
+fn set_settings(state: State<'_, AppState>, settings: Settings) -> CmdResult<bool> {
+    validate_settings(&settings)?;
+    let json = serde_json::to_vec_pretty(&settings).map_err(fail)?;
+    ferry_core::write_atomic(&state.settings_path, &json).map_err(fail)?;
+    let restart = settings.relay != *state.node.relay();
+    *state.settings.lock().unwrap() = settings;
+    Ok(restart)
+}
+
+/// Links that arrived from outside (deep link, opened file, second launch) since last asked.
+#[tauri::command]
+fn take_pending_links(state: State<'_, AppState>) -> Vec<String> {
+    std::mem::take(&mut *state.pending_links.lock().unwrap())
+}
+
+// ------------------------------------------------------------- integration
+
+fn is_ferry_url(arg: &str) -> bool {
+    arg.trim()
+        .get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case("ferry://"))
+}
+
+/// Turn a command-line argument or URL into share-link text, if it is one.
+fn link_from_arg(arg: &str) -> Option<String> {
+    let arg = arg.trim();
+    if is_ferry_url(arg) {
+        return Some(arg.to_string());
+    }
+    read_share_file_checked(Path::new(arg)).ok()
+}
+
+fn accept_links(app: &AppHandle, args: impl IntoIterator<Item = String>) {
+    let links: Vec<String> = args.into_iter().filter_map(|a| link_from_arg(&a)).collect();
+    if links.is_empty() {
+        return;
+    }
+    if let Some(state) = app.try_state::<AppState>() {
+        state.pending_links.lock().unwrap().extend(links);
+    }
+    app.emit(OPEN_LINK, ()).ok();
+    show_main(app);
+}
+
+fn show_main(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        window.show().ok();
+        window.unminimize().ok();
+        window.set_focus().ok();
+    }
+}
+
+fn forward_events(app: AppHandle, node: &Node) {
+    let mut rx = node.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if let Event::DownloadUpdated { download } = &event
+                        && download.status == DownloadStatus::Completed
+                    {
+                        app.notification()
+                            .builder()
+                            .title("Download complete")
+                            .body(format!("{} is ready", download.name))
+                            .show()
+                            .ok();
+                    }
+                    app.emit(EVENT, &event).ok();
+                }
+                // Some events were missed: have the UI reload its lists.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    app.emit(RESYNC, ()).ok();
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+}
+
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, "open", "Open Ferry", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Ferry", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("Ferry: sharing while open")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "open" => show_main(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        });
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
+fn init_logging(dir: &Path) {
+    let path = dir.join("ferry.log");
+    // Keep one previous log; start a new one when the current one gets large.
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG) {
+        std::fs::rename(&path, dir.join("ferry.log.1")).ok();
+    }
+    let writer = std::fs::create_dir_all(dir)
+        .and_then(|_| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+        })
+        .ok();
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "warn,ferry_core=info,ferry_desktop_lib=info".into());
+    match writer {
+        Some(file) => tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(Mutex::new(file))
+            .init(),
+        None => tracing_subscriber::fmt().with_env_filter(filter).init(),
+    }
+}
+
+/// Where the node keeps its identity, store and partial downloads: the local (not roaming)
+/// app data folder, since partial downloads can be large. Data from versions that used the
+/// roaming folder is moved over once.
+fn node_dir(app: &tauri::App) -> tauri::Result<PathBuf> {
+    let local = app.path().app_local_data_dir()?.join("node");
+    let roaming = app.path().app_data_dir()?.join("node");
+    if roaming != local && roaming.exists() && !local.exists() {
+        if let Some(parent) = local.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        if let Err(e) = std::fs::rename(&roaming, &local) {
+            tracing::warn!("could not move Ferry data to {}: {e}", local.display());
+            return Ok(roaming);
+        }
+    }
+    Ok(local)
+}
+
+fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    init_logging(&app.path().app_log_dir()?);
+    let config_dir = app.path().app_data_dir()?;
+    std::fs::create_dir_all(&config_dir)?;
+    let settings_path = config_dir.join("settings.json");
+    let default_downloads = app
+        .path()
+        .download_dir()
+        .unwrap_or_else(|_| config_dir.join("Downloads"));
+    let settings = load_settings(&settings_path, default_downloads);
+
+    let mut config = Config::new(node_dir(app)?);
+    config.relay = settings.relay.clone();
+    let node = match tauri::async_runtime::block_on(Node::start(config)) {
+        Ok(node) => node,
+        Err(e) => {
+            // Without a console nobody would see a panic; tell the user, then quit.
+            tracing::error!("could not start Ferry: {e:#}");
+            let handle = app.handle().clone();
+            app.dialog()
+                .message(format!(
+                    "Ferry could not start.\n\n{e:#}\n\nIf this keeps happening, check the log in {}.",
+                    app.path()
+                        .app_log_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default()
+                ))
+                .title("Ferry")
+                .kind(MessageDialogKind::Error)
+                .show(move |_| handle.exit(1));
+            return Ok(());
+        }
+    };
+    forward_events(app.handle().clone(), &node);
+    // Links shown before the relay connection is up lack the relay address; refresh the UI
+    // once the node is reachable from anywhere.
+    {
+        let node = node.clone();
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            if node.wait_online(std::time::Duration::from_secs(20)).await {
+                handle.emit(RESYNC, ()).ok();
+            }
+        });
+    }
+    app.manage(AppState {
+        node,
+        settings: Mutex::new(settings),
+        settings_path,
+        pending_links: Mutex::new(Vec::new()),
+    });
+
+    build_tray(app)?;
+
+    // Register ferry:// for this executable (installers do this too; needed for dev builds
+    // and AppImages).
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Err(e) = app.deep_link().register_all() {
+        tracing::warn!("could not register ferry:// links: {e}");
+    }
+    let handle = app.handle().clone();
+    app.deep_link().on_open_url(move |event| {
+        accept_links(&handle, event.urls().into_iter().map(|u| u.to_string()));
+    });
+    // A link that launched the app before the handler above existed.
+    if let Ok(Some(urls)) = app.deep_link().get_current() {
+        accept_links(app.handle(), urls.into_iter().map(|u| u.to_string()));
+    }
+    // Launched by opening a .ferry file (Windows/Linux pass it as an argument).
+    accept_links(
+        app.handle(),
+        std::env::args().skip(1).filter(|a| !is_ferry_url(a)),
+    );
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    let mut builder = tauri::Builder::default();
+    // Must be the first plugin: a second launch hands its arguments to the running instance
+    // and exits. ferry:// links are forwarded to the deep-link plugin (on_open_url), so only
+    // file arguments are handled here.
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+            accept_links(app, argv.into_iter().skip(1).filter(|a| !is_ferry_url(a)));
+            show_main(app);
+        }));
+    }
+    let app = builder
+        .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .setup(setup)
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let to_tray = window
+                    .try_state::<AppState>()
+                    .is_some_and(|s| s.settings.lock().unwrap().close_to_tray);
+                if to_tray {
+                    api.prevent_close();
+                    window.hide().ok();
+                }
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            node_status,
+            list_shares,
+            get_share,
+            create_share,
+            remove_share,
+            save_share_file,
+            share_qr,
+            read_share_file,
+            preview,
+            list_downloads,
+            start_download,
+            pause_download,
+            resume_download,
+            remove_download,
+            reveal_download,
+            get_settings,
+            set_settings,
+            take_pending_links,
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while building Ferry");
+
+    app.run(|app, event| match event {
+        RunEvent::Exit => {
+            if let Some(state) = app.try_state::<AppState>() {
+                let node = state.node.clone();
+                tauri::async_runtime::block_on(async move { node.shutdown().await.ok() });
+            }
+        }
+        // macOS delivers opened files and links as events, not arguments.
+        #[cfg(target_os = "macos")]
+        RunEvent::Opened { urls } => accept_links(
+            app,
+            urls.into_iter().map(|u| {
+                u.to_file_path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| u.to_string())
+            }),
+        ),
+        // Clicking the Dock icon brings back a window hidden to the tray.
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => show_main(app),
+        _ => {}
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_links_and_share_files() {
+        assert_eq!(
+            link_from_arg("FERRY://get?t=abc").as_deref(),
+            Some("FERRY://get?t=abc")
+        );
+        assert!(link_from_arg("--flag").is_none());
+        let dir = tempfile_dir();
+        let file = dir.join("x.ferry");
+        std::fs::write(&file, "{\"ticket\":\"t\"}").unwrap();
+        assert!(link_from_arg(file.to_str().unwrap()).is_some());
+        let other = dir.join("x.txt");
+        std::fs::write(&other, "secret").unwrap();
+        assert!(link_from_arg(other.to_str().unwrap()).is_none());
+        assert!(read_share_file_checked(&other).is_err());
+    }
+
+    #[test]
+    fn settings_are_validated() {
+        let ok = Settings {
+            download_dir: std::env::temp_dir(),
+            relay: RelayChoice::Custom("https://relay.example.com".into()),
+            close_to_tray: true,
+        };
+        assert!(validate_settings(&ok).is_ok());
+        let bad_relay = Settings {
+            relay: RelayChoice::Custom("https://".into()),
+            ..ok.clone()
+        };
+        assert!(validate_settings(&bad_relay).is_err());
+        let relative = Settings {
+            download_dir: PathBuf::from("downloads"),
+            ..ok
+        };
+        assert!(validate_settings(&relative).is_err());
+    }
+
+    fn tempfile_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ferry-desktop-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+}

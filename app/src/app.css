@@ -1,0 +1,213 @@
+/* Ferry: black glass and magenta neon. The tickets are the one loud thing: white paper stock
+   with a magenta band, like the ones in the app icon. Everything else is quiet dark glass. */
+
+:root {
+  --night: #08060b;
+  --night-2: #110b14;
+  --glass: rgb(255 255 255 / 0.045);
+  --glass-strong: rgb(255 255 255 / 0.075);
+  --glass-edge: rgb(255 255 255 / 0.09);
+  --glass-shine: rgb(255 255 255 / 0.14);
+  --ink: #f6eff5;
+  --ink-soft: #b3a3b4;
+  --ink-faint: #7d6d7f;
+  --magenta: #ff2d95;
+  --magenta-soft: rgb(255 45 149 / 0.16);
+  --magenta-glow: rgb(255 45 149 / 0.45);
+  --magenta-deep: #b8106a;
+  --gold: #e2b354;
+  --paper: #fbf6fa;
+  --paper-ink: #2a0d20;
+  --paper-soft: #8a6a7e;
+  --paper-line: #ead9e4;
+  --relay: #b79cff;
+  --danger: #ff6b6b;
+  --focus: #ff7ab8;
+
+  --font: "Recursive Variable", system-ui, sans-serif;
+  --mono: "MONO" 1, "CASL" 0;
+  --sans: "MONO" 0, "CASL" 0;
+
+  /* Type scale (1.25) */
+  --t-xs: 0.8rem;
+  --t-sm: 0.9rem;
+  --t-md: 1rem;
+  --t-lg: 1.25rem;
+  --t-xl: 1.563rem;
+  --t-2xl: 1.953rem;
+
+  --blur: blur(18px) saturate(150%);
+
+  color-scheme: dark;
+  font-family: var(--font);
+  font-variation-settings: var(--sans);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--night);
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--night);
+  overflow: hidden;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: var(--t-2xl);
+  font-weight: 780;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
+}
+
+h2 {
+  font-size: var(--t-lg);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.muted {
+  color: var(--ink-soft);
+}
+
+.code {
+  font-variation-settings: var(--mono);
+}
+
+/* A pane of dark glass. */
+.glass {
+  background: linear-gradient(180deg, var(--glass-strong), var(--glass));
+  border: 1px solid var(--glass-edge);
+  box-shadow: inset 0 1px 0 var(--glass-shine), 0 18px 40px -24px rgb(0 0 0 / 0.8);
+  backdrop-filter: var(--blur);
+  -webkit-backdrop-filter: var(--blur);
+}
+
+button,
+input,
+select {
+  font: inherit;
+  font-variation-settings: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: 1px solid var(--glass-edge);
+  background: var(--glass);
+  border-radius: 10px;
+  padding: 0.48rem 0.95rem;
+  font-weight: 620;
+  font-size: var(--t-sm);
+  transition: background 140ms, border-color 140ms, box-shadow 140ms;
+}
+
+button:hover:not(:disabled) {
+  background: var(--glass-strong);
+  border-color: rgb(255 255 255 / 0.22);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* The one primary action on a screen. */
+button.primary {
+  background: linear-gradient(180deg, #ff4aa6, var(--magenta) 55%, #e01d80);
+  border-color: rgb(255 140 200 / 0.6);
+  color: #fff;
+  box-shadow: 0 0 0 1px rgb(255 45 149 / 0.25), 0 6px 22px -6px var(--magenta-glow);
+}
+
+button.primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, #ff63b3, #ff3a9c 55%, #ea2489);
+  border-color: rgb(255 170 215 / 0.8);
+  box-shadow: 0 0 0 1px rgb(255 45 149 / 0.35), 0 8px 28px -6px var(--magenta-glow);
+}
+
+button.quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-soft);
+}
+
+button.quiet:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--glass);
+  border-color: var(--glass-edge);
+}
+
+button.danger:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: rgb(255 107 107 / 0.5);
+}
+
+input[type="text"],
+input[type="url"] {
+  width: 100%;
+  background: rgb(0 0 0 / 0.35);
+  border: 1px solid var(--glass-edge);
+  border-radius: 10px;
+  padding: 0.62rem 0.8rem;
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.5);
+}
+
+input::placeholder {
+  color: var(--ink-faint);
+}
+
+input[type="text"]:focus,
+input[type="url"]:focus {
+  border-color: rgb(255 45 149 / 0.6);
+  outline: none;
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 0.5), 0 0 0 3px var(--magenta-soft);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.bar {
+  height: 6px;
+  border-radius: 3px;
+  background: rgb(255 255 255 / 0.07);
+  overflow: hidden;
+}
+
+.bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--magenta-deep), var(--magenta));
+  box-shadow: 0 0 12px var(--magenta-glow);
+  transition: width 240ms linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}

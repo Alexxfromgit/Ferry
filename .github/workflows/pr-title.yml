@@ -1,0 +1,36 @@
+name: PR title
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # This job reads PR metadata and never checks out or runs PR code.
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            deps
+            revert
+            docs
+            refactor
+            test
+            build
+            ci
+            chore
+            style
+          requireScope: false
+          subjectPattern: ^[a-z].+$
+          subjectPatternError: >-
+            Start "{subject}" with a lowercase letter, as in "fix: restore the download queue".

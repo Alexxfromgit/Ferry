@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- MSI installer: give .ferry files the ticket icon. Tauri registers the association as the
+     advertised ProgId "Ferry.ferry"; this adds its DefaultIcon. Removed on uninstall. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="FerryFileIcon" Guid="9B3E6E2A-5C1D-4F7B-9A44-6E2F1C0D8B71">
+        <RegistryValue Root="HKLM" Key="Software\Classes\Ferry.ferry\DefaultIcon" Type="string"
+                       Value="[INSTALLDIR]ferry-file.ico,0" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+  </Fragment>
+</Wix>

@@ -1,0 +1,194 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    if: github.repository == 'Alexxfromgit/Ferry' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      tag: ${{ steps.release.outputs.tag_name }}
+    env:
+      HAS_RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN != '' }}
+    steps:
+      - name: Check release configuration
+        if: env.HAS_RELEASE_TOKEN == 'false'
+        run: echo "::notice::Set the repository's RELEASE_TOKEN Actions secret to enable Release Please."
+      - id: release
+        if: env.HAS_RELEASE_TOKEN == 'true'
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  prepare:
+    needs: release-please
+    if: >-
+      ${{ !cancelled() && github.repository == 'Alexxfromgit/Ferry' &&
+          (needs.release-please.outputs.tag != '' ||
+           (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # Draft releases are visible to callers with write access.
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.release-please.outputs.tag || github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Use a vX.Y.Z tag."
+            exit 1
+          fi
+          if [[ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" != true ]]; then
+            echo "::error::Create a draft release for $TAG before building its assets."
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: prepare
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.tag }}
+
+  build:
+    name: Installers (${{ matrix.platform }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: windows-x64, os: windows-latest, extensions: 'msi,exe' }
+          - { platform: macos-arm64, os: macos-15, extensions: dmg }
+          - { platform: macos-x64, os: macos-15-intel, extensions: dmg }
+          - { platform: linux-x64, os: ubuntu-22.04, extensions: 'deb,AppImage' }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+      TAG: ${{ needs.prepare.outputs.tag }}
+      EXTENSIONS: ${{ matrix.extensions }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Check release versions
+        shell: pwsh
+        run: |
+          $expected = $env:TAG.Substring(1)
+          $workspace = cargo metadata --no-deps --locked --format-version 1 | ConvertFrom-Json
+          $package = Get-Content app/package.json -Raw | ConvertFrom-Json
+          $lock = Get-Content app/package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          $desktop = Get-Content app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $manifest = Get-Content .release-please-manifest.json -Raw | ConvertFrom-Json -AsHashtable
+          $versions = @($workspace.packages.version) + @(
+            $package.version, $lock.version, $lock.packages[''].version, $desktop.version, $manifest['.']
+          )
+          if ($versions | Where-Object { $_ -cne $expected }) {
+            throw "All Ferry package versions must match $env:TAG."
+          }
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            build-essential libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf libxdo-dev libfuse2 file xdg-utils
+      - name: Build installers
+        if: runner.os != 'Windows'
+        run: ./build.sh --bundle
+      - name: Build installers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./build.ps1 -Bundle
+      - name: Stage installers
+        shell: pwsh
+        run: |
+          $version = $env:TAG.Substring(1)
+          New-Item -ItemType Directory -Path release-assets | Out-Null
+          foreach ($ext in $env:EXTENSIONS.Split(',')) {
+            $files = @(Get-ChildItem target/release/bundle -Recurse -File -Filter "*.$ext")
+            if ($files.Count -ne 1) {
+              throw "Expected one .$ext installer for $env:PLATFORM, found $($files.Count)."
+            }
+            Copy-Item -LiteralPath $files[0].FullName -Destination "release-assets/Ferry-$version-$env:PLATFORM.$ext"
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: release-assets/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+
+  publish:
+    needs: [prepare, verify, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: assets
+          merge-multiple: true
+      - name: Validate assets and write checksums
+        working-directory: assets
+        run: |
+          base="Ferry-${TAG#v}"
+          files=("$base-windows-x64.msi" "$base-windows-x64.exe"
+            "$base-macos-arm64.dmg" "$base-macos-x64.dmg"
+            "$base-linux-x64.deb" "$base-linux-x64.AppImage")
+          for file in "${files[@]}"; do
+            test -s "$file"
+          done
+          sha256sum -- "${files[@]}" > SHA256SUMS.txt
+      - uses: actions/attest@v4
+        with:
+          subject-path: assets/*
+      - name: Upload and publish draft
+        working-directory: assets
+        run: |
+          if [[ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" != true ]]; then
+            echo "::error::$TAG is no longer a draft."
+            exit 1
+          fi
+          gh release upload "$TAG" ./* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"

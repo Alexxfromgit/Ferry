@@ -1,0 +1,22 @@
+[package]
+name = "ferry-cli"
+description = "Headless Ferry client for testing shares across networks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ferry"
+path = "src/main.rs"
+
+[dependencies]
+ferry-core = { path = "../ferry-core" }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+dirs = "6"
+
+[dev-dependencies]
+tempfile.workspace = true
