@@ -12,6 +12,7 @@ mod link;
 mod node;
 mod provider;
 mod registry;
+mod ticket_file;
 mod util;
 
 pub use config::{Config, RelayChoice, validate_relay_url};
@@ -21,4 +22,5 @@ pub use link::{
 };
 pub use node::{Node, NodeStatus, PREVIEW_FILES, Preview};
 pub use registry::{DownloadInfo, DownloadStatus, ShareInfo, SkipReason, SkippedItem};
+pub use ticket_file::{ProtectedTicket, TicketFile, TicketPassword};
 pub use util::write_atomic;

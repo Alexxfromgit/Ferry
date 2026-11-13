@@ -140,12 +140,37 @@ describe("checking links", () => {
 
   it("opens links handed over from outside on the Receive screen", async () => {
     const { app, receive } = await freshStore();
-    backend.take_pending_links = () => ['{"ticket": "blob"}'];
+    backend.take_pending_links = () => [{ kind: "link", link: "ferry://get?t=blob" }];
+    backend.preview = () => Promise.resolve(preview("from link"));
+    handlers["ferry-open-link"]({ payload: null });
+    await vi.waitFor(() => expect(receive.preview?.name).toBe("from link"));
+    expect(app.view).toBe("receive");
+    expect(receive.link).toBe("ferry://get?t=blob");
+  });
+
+  it("prompts for a protected ticket opened from the desktop and lets the user retry", async () => {
+    const { app, receive, openTicket } = await freshStore();
+    const path = "C:/x/protected.ferry";
+    backend.take_pending_links = () => [{ kind: "file", path }];
+    backend.read_share_file = ({ password }) => {
+      if (password === null) return { kind: "passwordRequired" };
+      if (password === "correct") return { kind: "ready", link: "ferry://get?t=blob" };
+      throw new Error("Incorrect password");
+    };
     backend.preview = () => Promise.resolve(preview("from file"));
     handlers["ferry-open-link"]({ payload: null });
-    await vi.waitFor(() => expect(receive.preview?.name).toBe("from file"));
+    await vi.waitFor(() => expect(receive.protectedTicket).toBe(path));
     expect(app.view).toBe("receive");
-    expect(receive.link, "JSON from a .ferry file is not shown in the link field").toBe("");
+    expect(invoke).not.toHaveBeenCalledWith("preview", expect.anything());
+
+    await openTicket(path, "wrong");
+    expect(receive.protectedTicket).toBe(path);
+    expect(receive.problem?.detail).toMatch(/Incorrect password/);
+
+    await openTicket(path, "correct");
+    expect(receive.protectedTicket).toBeNull();
+    expect(receive.preview?.name).toBe("from file");
+    expect(receive.link).toBe("");
   });
 });
 
@@ -174,7 +199,7 @@ describe("sharing", () => {
 describe("drag and drop", () => {
   it("opens dropped .ferry files and shares anything else", async () => {
     const { app, receive } = await freshStore();
-    backend.read_share_file = () => '{"ticket": "blob"}';
+    backend.read_share_file = () => ({ kind: "ready", link: "ferry://get?t=blob" });
     backend.preview = () => Promise.resolve(preview("dropped"));
     await dropHandler!({ payload: { type: "drop", paths: ["C:/x/trip.ferry"] } });
     expect(app.view).toBe("receive");

@@ -29,6 +29,8 @@ export const app = $state({
 export const receive = $state({
   link: "",
   checking: false,
+  openingTicket: false,
+  protectedTicket: null as string | null,
   preview: null as Preview | null,
   /** The link text the preview was made from. */
   previewLink: "",
@@ -95,13 +97,14 @@ async function resync() {
 }
 
 async function takeIncoming() {
-  const links = await api.takePendingLinks();
-  if (links.length > 0) {
-    const link = links[links.length - 1];
-    app.view = "receive";
-    // A .ferry file's JSON is checked but not shown in the link field.
-    receive.link = link.trim().startsWith("{") ? "" : link.trim();
-    await checkLink(link);
+  const incoming = (await api.takePendingLinks()).at(-1);
+  if (!incoming) return;
+  app.view = "receive";
+  if (incoming.kind === "file") {
+    await openTicket(incoming.path);
+  } else {
+    receive.link = incoming.link;
+    await checkLink(incoming.link);
   }
 }
 
@@ -129,10 +132,39 @@ export async function share(paths: string[]) {
 
 let checkToken = 0;
 
+/** Open a ticket from the file picker, a drop, or the operating system. */
+export async function openTicket(path: string, password?: string) {
+  clearPreview();
+  const token = checkToken;
+  app.view = "receive";
+  receive.link = "";
+  receive.openingTicket = true;
+  if (password !== undefined) receive.protectedTicket = path;
+  try {
+    const ticket = await api.readShareFile(path, password);
+    if (token !== checkToken) return;
+    if (ticket.kind === "passwordRequired") {
+      receive.protectedTicket = path;
+    } else {
+      await checkLink(ticket.link);
+    }
+  } catch (err) {
+    if (token !== checkToken) return;
+    receive.problem = {
+      title: password === undefined ? "Couldn't open the ticket file." : "Couldn't unlock the ticket file.",
+      detail: message(err),
+    };
+  } finally {
+    if (token === checkToken) receive.openingTicket = false;
+  }
+}
+
 /** Contact the sender and show what the link contains. Only the latest check wins. */
 export async function checkLink(text: string) {
   if (!text.trim()) return;
   const token = ++checkToken;
+  receive.openingTicket = false;
+  receive.protectedTicket = null;
   receive.checking = true;
   receive.problem = null;
   receive.preview = null;
@@ -161,6 +193,9 @@ export function clearPreview() {
   receive.preview = null;
   receive.previewLink = "";
   receive.checking = false;
+  receive.openingTicket = false;
+  receive.protectedTicket = null;
+  receive.problem = null;
   receive.dest = null;
 }
 
@@ -201,14 +236,7 @@ export async function init() {
       app.dragging = false;
       const tickets = p.paths.filter((x) => x.toLowerCase().endsWith(".ferry"));
       if (tickets.length > 0 && tickets.length === p.paths.length) {
-        try {
-          const text = await api.readShareFile(tickets[0]);
-          app.view = "receive";
-          receive.link = "";
-          await checkLink(text);
-        } catch (err) {
-          toast(`Couldn't open the ticket file: ${message(err)}`, true);
-        }
+        await openTicket(tickets[0]);
       } else {
         app.view = "send";
         await share(p.paths);

@@ -19,39 +19,33 @@ pub fn write_atomic_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
 }
 
 fn write_atomic_inner(path: &Path, data: &[u8], private: bool) -> anyhow::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut options = tempfile::Builder::new();
+    options.prefix(".ferry-");
     #[cfg(unix)]
-    if private {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if private { 0o600 } else { 0o666 };
+        options.permissions(std::fs::Permissions::from_mode(mode));
     }
     #[cfg(not(unix))]
     let _ = private;
-    let result = (|| {
-        let mut file = options
-            .open(&tmp)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        file.write_all(data)?;
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
-        #[cfg(unix)]
-        if let Ok(dir) = std::fs::File::open(dir) {
-            dir.sync_all().ok();
-        }
-        anyhow::Ok(())
-    })();
-    if result.is_err() {
-        std::fs::remove_file(&tmp).ok();
+    let mut file = options
+        .tempfile_in(dir)
+        .with_context(|| format!("writing {}", path.display()))?;
+    file.write_all(data)?;
+    file.as_file().sync_all()?;
+    file.into_temp_path()
+        .persist(path)
+        .with_context(|| format!("replacing {}", path.display()))?;
+    #[cfg(unix)]
+    if let Ok(dir) = std::fs::File::open(dir) {
+        dir.sync_all().ok();
     }
-    result
+    Ok(())
 }
 
 /// Convert a relative path into a `/`-separated collection entry name.

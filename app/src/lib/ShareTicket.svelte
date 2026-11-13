@@ -11,6 +11,9 @@
 
   let qr = $state<string | null>(null);
   let qrDialog = $state<HTMLDialogElement | null>(null);
+  let passwordDialog = $state<HTMLDialogElement | null>(null);
+  let passwordProblem = $state("");
+  let saving = $state(false);
 
   // Re-fetch when the share changes or its link may have changed (relay connected).
   $effect(() => {
@@ -69,17 +72,36 @@
     }
   }
 
-  async function saveFile() {
-    const path = await save({
-      defaultPath: `${share.name}.ferry`,
-      filters: [{ name: "Ferry ticket", extensions: ["ferry"] }],
-    });
-    if (!path) return;
+  async function saveFile(password?: string) {
+    const id = share.id;
+    saving = true;
     try {
-      await api.saveShareFile(share.id, path);
-      toast("Ticket file saved");
+      const path = await save({
+        defaultPath: password === undefined ? `${share.name}.ferry` : "protected-ticket.ferry",
+        filters: [{ name: "Ferry ticket", extensions: ["ferry"] }],
+      });
+      if (!path) return;
+      await api.saveShareFile(id, path, password);
+      toast(password === undefined ? "Ticket file saved" : "Password-protected ticket saved");
     } catch (err) {
       toast(`Couldn't save the ticket file: ${message(err)}`, true);
+    } finally {
+      saving = false;
+    }
+  }
+
+  function saveProtected(event: SubmitEvent & { currentTarget: HTMLFormElement }) {
+    event.preventDefault();
+    const values = new FormData(event.currentTarget);
+    const password = values.get("password");
+    if (typeof password !== "string" || !password.trim()) {
+      passwordProblem = "Enter a password.";
+    } else if (password !== values.get("confirmation")) {
+      passwordProblem = "Passwords do not match.";
+    } else {
+      event.currentTarget.reset();
+      passwordDialog?.close();
+      void saveFile(password);
     }
   }
 
@@ -193,7 +215,10 @@
 
         <div class="actions">
           <button class="t-main" onclick={copyLink}>Copy link</button>
-          <button class="t-line" onclick={saveFile}>Save ticket file</button>
+          <button class="t-line" onclick={() => void saveFile()} disabled={saving}>Save ticket file</button>
+          <button class="t-line" onclick={() => passwordDialog?.showModal()} disabled={saving}>
+            Save with password
+          </button>
           <button class="t-text" onclick={stop}>Stop sharing</button>
         </div>
       </div>
@@ -226,6 +251,34 @@
   </article>
 </div>
 
+<dialog
+  bind:this={passwordDialog}
+  class="protect-dialog"
+  aria-label="Save a password-protected ticket"
+  onclose={() => {
+    passwordDialog?.querySelector("form")?.reset();
+    passwordProblem = "";
+  }}
+>
+  <form onsubmit={saveProtected}>
+    <h2>Save a password-protected ticket</h2>
+    <p class="muted">Use a strong passphrase and send it separately from the ticket file.</p>
+    <label>
+      Password
+      <input name="password" type="password" autocomplete="new-password" required />
+    </label>
+    <label>
+      Confirm password
+      <input name="confirmation" type="password" autocomplete="new-password" required />
+    </label>
+    {#if passwordProblem}<p role="alert">{passwordProblem}</p>{/if}
+    <div class="protect-actions">
+      <button class="quiet" type="button" onclick={() => passwordDialog?.close()}>Cancel</button>
+      <button class="primary" type="submit">Choose where to save</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- A native modal dialog: focus moves in, Escape closes it, the page behind is inert, and
      focus returns to the QR button afterwards. Clicking the backdrop also closes it. -->
 <dialog
@@ -244,6 +297,36 @@
 </dialog>
 
 <style>
+  .protect-dialog {
+    width: min(27rem, calc(100% - 2rem));
+    padding: 1.4rem;
+    border: 1px solid var(--glass-edge);
+    border-radius: 14px;
+    background: var(--night-2);
+    color: var(--ink);
+  }
+
+  .protect-dialog::backdrop {
+    background: rgb(0 0 0 / 0.65);
+  }
+
+  .protect-dialog form,
+  .protect-dialog label {
+    display: grid;
+    gap: 0.5rem;
+  }
+
+  .protect-dialog form {
+    gap: 0.85rem;
+  }
+
+  .protect-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 0.5rem;
+  }
+
   /* Outer wrapper carries the glow; the ticket itself is masked for the notches. */
   .wrap {
     --stub: 168px;

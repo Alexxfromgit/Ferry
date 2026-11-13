@@ -79,7 +79,7 @@ pub struct FileEntry {
     pub size: u64,
 }
 
-/// Contents of a `.ferry` file. Small JSON, safe to email or put in a chat.
+/// Payload of a `.ferry` ticket file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareFile {

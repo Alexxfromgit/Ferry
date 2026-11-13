@@ -1,12 +1,16 @@
 //! `ferry` command-line client: the same engine as the desktop app, for headless testing.
 
-use std::{io::Write, path::PathBuf, time::Duration};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use ferry_core::{
     Config, ConnectionKind, DownloadStatus, Event, Node, RelayChoice, SHARE_FILE_EXTENSION,
-    ShareLink, SkipReason,
+    ShareLink, SkipReason, TicketFile, TicketPassword,
 };
 
 #[derive(Parser)]
@@ -34,6 +38,9 @@ enum Command {
         /// Also write a .ferry share file to this path.
         #[arg(long)]
         save_file: Option<PathBuf>,
+        /// Prompt for a password to protect the saved ticket file.
+        #[arg(long, requires = "save_file")]
+        protect: bool,
     },
     /// Keep serving all existing shares until Ctrl+C.
     Serve,
@@ -102,7 +109,23 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Share { paths, save_file } => {
+        Command::Share {
+            paths,
+            save_file,
+            protect,
+        } => {
+            let password = if protect {
+                let password = rpassword::prompt_password("Ticket password: ")?;
+                anyhow::ensure!(!password.trim().is_empty(), "Enter a password");
+                let confirmation = rpassword::prompt_password("Confirm ticket password: ")?;
+                let matches = password == confirmation;
+                let password = TicketPassword::from(password.into_boxed_str());
+                drop(TicketPassword::from(confirmation.into_boxed_str()));
+                anyhow::ensure!(matches, "Passwords do not match");
+                Some(password)
+            } else {
+                None
+            };
             let mut events = node.subscribe();
             let progress = tokio::spawn(async move {
                 while let Ok(event) = events.recv().await {
@@ -144,10 +167,14 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                 } else {
                     path
                 };
-                std::fs::write(&path, node.share_file(&share.id)?.to_json())?;
+                node.share_file(&share.id)?.save(&path, password)?;
                 println!("share file written to {}", path.display());
             }
-            println!("\nsend this link to the recipient:\n\n{}\n", share.link);
+            if protect {
+                println!("Send the ticket file and share its password separately.");
+            } else {
+                println!("\nsend this link to the recipient:\n\n{}\n", share.link);
+            }
             serve(node).await
         }
         Command::Serve => {
@@ -159,12 +186,20 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
             serve(node).await
         }
         Command::Get { link, dest, yes } => {
-            let text = if std::path::Path::new(&link).is_file() {
-                std::fs::read_to_string(&link)?
+            let path = Path::new(&link);
+            let link = if path.is_file() {
+                match TicketFile::read(path)? {
+                    TicketFile::Ready(link) => link,
+                    TicketFile::Protected(ticket) => {
+                        let password = rpassword::prompt_password("Ticket password: ").context(
+                            "Opening this ticket requires an interactive password prompt",
+                        )?;
+                        ticket.unlock(TicketPassword::from(password.into_boxed_str()))?
+                    }
+                }
             } else {
-                link
+                ShareLink::parse(&link)?
             };
-            let link = ShareLink::parse(&text)?;
             eprintln!("connecting to the sender...");
             let preview = node.preview(&link).await?;
             println!(

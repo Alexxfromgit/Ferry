@@ -43,6 +43,12 @@ ticket includes the sender's device ID and network addresses. Ferry also publish
 address records through iroh's public discovery service so tickets can keep working when a
 device changes networks. [How Ferry connects](docs/NETWORKING.md)
 
+**Save ticket file** creates a binary `.ferry` file that opens directly in Ferry. Choose
+**Save with password** to encrypt the ticket and its contents. Use a strong passphrase and
+send it separately. A link, QR code, or ordinary ticket for the same share still grants
+access on its own. Update Ferry on the receiving device to open the new files. Current Ferry
+versions can also read older JSON tickets.
+
 ### Command line
 
 The `ferry` CLI uses the same transfer engine. Build it with
@@ -57,6 +63,9 @@ ferry status
 
 Keep the share command running until the transfer finishes. Run `ferry --help` for
 relay and data directory options.
+
+To save an encrypted ticket, use `ferry share ./Photos --save-file protected-ticket.ferry --protect`.
+Both `share` and `get` prompt for the password in the terminal without echoing it.
 
 ## Build from source
 
