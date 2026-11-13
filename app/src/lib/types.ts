@@ -80,6 +80,7 @@ export interface Settings {
   downloadDir: string;
   relay: RelayChoice;
   closeToTray: boolean;
+  showArtwork: boolean;
 }
 
 export type FerryEvent =

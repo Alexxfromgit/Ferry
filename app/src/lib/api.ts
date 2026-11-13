@@ -27,6 +27,8 @@ export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<boolean>("set_settings", { settings }),
   takePendingLinks: () => invoke<IncomingShare[]>("take_pending_links"),
+  openProjectPage: () => invoke<void>("open_project_page"),
+  openThirdPartyNotices: () => invoke<void>("open_third_party_notices"),
 };
 
 /** Errors from commands arrive as plain strings. */

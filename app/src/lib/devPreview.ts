@@ -74,6 +74,23 @@ const fakeQr = (() => {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 25 25" fill="#2A0D20">${cells}</svg>`;
 })();
 
+// ?empty starts with nothing shared or downloaded; ?slow holds the startup splash for 2 seconds.
+const params = new URLSearchParams(location.search);
+const empty = params.has("empty");
+const slow = params.has("slow");
+
+const status = {
+  nodeId: hex(9),
+  relayUrl: "https://euw1-1.relay.n0.iroh.link./",
+  directAddresses: ["192.168.1.20:51820"],
+};
+const settings = {
+  downloadDir: "C:\\Users\\alex\\Downloads",
+  relay: { mode: "default" },
+  closeToTray: true,
+  showArtwork: true,
+};
+
 export function installDevPreview() {
   mockWindows("main");
   mockIPC(
@@ -82,15 +99,24 @@ export function installDevPreview() {
         case "get_share":
           return shares.find((s) => s.id === (args as { id: string }).id);
         case "node_status":
-          return { nodeId: hex(9), relayUrl: "https://euw1-1.relay.n0.iroh.link./", directAddresses: ["192.168.1.20:51820"] };
+          if (slow) return new Promise((done) => setTimeout(() => done(status), 2000));
+          return status;
         case "list_shares":
-          return shares;
+          return empty ? [] : shares;
         case "list_downloads":
-          return downloads;
+          return empty ? [] : downloads;
+        case "plugin:app|version":
+          return "0.1.0";
+        case "open_project_page":
+        case "open_third_party_notices":
+          return null;
         case "share_qr":
           return fakeQr;
         case "get_settings":
-          return { downloadDir: "C:\\Users\\alex\\Downloads", relay: { mode: "default" }, closeToTray: true };
+          return settings;
+        case "set_settings":
+          Object.assign(settings, (args as { settings: typeof settings }).settings);
+          return false;
         case "take_pending_links":
           return [];
         case "preview":

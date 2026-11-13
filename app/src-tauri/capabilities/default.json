@@ -1,9 +1,10 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Only what the Ferry UI uses: events, file dialogs and writing the share link to the clipboard.",
+  "description": "Only what the Ferry UI uses: events, file dialogs, writing the share link to the clipboard and reading the app version.",
   "windows": ["main"],
   "permissions": [
+    "core:app:allow-version",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "dialog:allow-open",

@@ -61,6 +61,7 @@ beforeEach(() => {
     list_downloads: () => [],
     node_status: () => ({ nodeId: "n", directAddresses: [] }),
     take_pending_links: () => [],
+    get_settings: () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: true }),
   };
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string, args: unknown) => {
@@ -209,5 +210,24 @@ describe("drag and drop", () => {
     await dropHandler!({ payload: { type: "drop", paths: ["C:/x/Photos", "C:/x/trip.ferry"] } });
     expect(app.view).toBe("send");
     expect(invoke).toHaveBeenCalledWith("create_share", { paths: ["C:/x/Photos", "C:/x/trip.ferry"] });
+  });
+
+  it("tells the overlay whether a drop would open tickets or share files", async () => {
+    const { app } = await freshStore();
+    await dropHandler!({ payload: { type: "enter", paths: ["C:/x/a.FERRY", "C:/x/b.ferry"] } });
+    expect(app.dragging).toBe(true);
+    expect(app.dragKind).toBe("tickets");
+    await dropHandler!({ payload: { type: "leave" } });
+    expect(app.dragging).toBe(false);
+    await dropHandler!({ payload: { type: "enter", paths: ["C:/x/Photos", "C:/x/b.ferry"] } });
+    expect(app.dragKind).toBe("files");
+  });
+});
+
+describe("artwork", () => {
+  it("follows the saved setting", async () => {
+    backend.get_settings = () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: false });
+    const { app } = await freshStore();
+    expect(app.showArtwork).toBe(false);
   });
 });

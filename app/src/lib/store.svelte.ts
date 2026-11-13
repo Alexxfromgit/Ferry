@@ -5,6 +5,12 @@ import { plural } from "./format";
 import type { DownloadInfo, FerryEvent, NodeStatus, Preview, ShareInfo } from "./types";
 
 export type View = "send" | "receive" | "settings";
+export type DragKind = "files" | "tickets";
+
+/** Dropping only .ferry files opens the first one as a ticket; anything else is shared. */
+export function dragKind(paths: string[]): DragKind {
+  return paths.length > 0 && paths.every((x) => x.toLowerCase().endsWith(".ferry")) ? "tickets" : "files";
+}
 
 interface Importing {
   doneBytes: number;
@@ -20,6 +26,12 @@ export const app = $state({
   downloads: [] as DownloadInfo[],
   importing: null as Importing | null,
   dragging: false,
+  /** What a drop would do: share the files, or open the ticket files being dragged. */
+  dragKind: "files" as DragKind,
+  /** False until `init` has finished, while the startup splash shows. */
+  ready: false,
+  /** Mirrors the saved setting, so the backdrop can follow it without reloading settings. */
+  showArtwork: true,
   toast: null as { text: string; error: boolean } | null,
   /** Bumped when share links may have changed (e.g. the relay connected); QR codes refetch. */
   linkEpoch: 0,
@@ -230,6 +242,10 @@ async function refreshStatus() {
 }
 
 export async function init() {
+  void api
+    .getSettings()
+    .then((s) => (app.showArtwork = s.showArtwork))
+    .catch(() => {});
   await listen<FerryEvent>("ferry-event", (e) => onEvent(e.payload));
   await listen("ferry-open-link", () => void takeIncoming());
   await listen("ferry-resync", () => void resync());
@@ -237,13 +253,15 @@ export async function init() {
   // Dropping files anywhere shares them; dropping .ferry files opens them.
   await getCurrentWebview().onDragDropEvent(async (e) => {
     const p = e.payload;
-    if (p.type === "enter" || p.type === "over") app.dragging = true;
+    if (p.type === "enter") {
+      app.dragKind = dragKind(p.paths);
+      app.dragging = true;
+    } else if (p.type === "over") app.dragging = true;
     else if (p.type === "leave") app.dragging = false;
     else if (p.type === "drop") {
       app.dragging = false;
-      const tickets = p.paths.filter((x) => x.toLowerCase().endsWith(".ferry"));
-      if (tickets.length > 0 && tickets.length === p.paths.length) {
-        await openTicket(tickets[0]);
+      if (dragKind(p.paths) === "tickets") {
+        await openTicket(p.paths[0]);
       } else {
         app.view = "send";
         await share(p.paths);

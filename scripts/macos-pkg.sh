@@ -57,10 +57,16 @@ pkgbuild --quiet \
     --install-location /Applications \
     "$work/component.pkg"
 
+# The mascot art from scripts/make-art.py, under the step list in Installer's left pane.
+mkdir "$work/resources"
+cp -- "$(dirname -- "$0")/../app/src-tauri/macos/pkg-background.png" "$work/resources/background.png"
+
 cat >"$work/distribution.xml" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
     <title>$title</title>
+    <background file="background.png" alignment="bottomleft" scaling="none"/>
+    <background-darkAqua file="background.png" alignment="bottomleft" scaling="none"/>
     <options customize="never" require-scripts="false" hostArchitectures="$host_archs"/>
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
     <volume-check>
@@ -93,6 +99,7 @@ pkg="$out_dir/${title}_${version}_${file_arch}.pkg"
 productbuild --quiet \
     --distribution "$work/distribution.xml" \
     --package-path "$work" \
+    --resources "$work/resources" \
     --identifier "$identifier" \
     --version "$version" \
     ${sign_args[@]+"${sign_args[@]}"} \
