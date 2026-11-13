@@ -10,7 +10,8 @@
 # .ferry file icon, from app/src-tauri/icons/ferry-file-source.png:
 #   the art is a finished document page (ticket, FERRY label, curled corner) on a dark
 #   background; the page is cut out along its measured outline and placed on a transparent
-#   square with a soft shadow. Writes app/src-tauri/icons/ferry-file.ico and ferry-file.png.
+#   square with a soft shadow. Writes app/src-tauri/icons/ferry-file.ico, ferry-file.png and
+#   ferry-file.icns (the macOS document icon, referenced from app/src-tauri/Info.plist).
 #
 # Usage (from the repo root): pwsh scripts/make-icons.ps1
 #   [-CornerRadius 0.2] [-AppSmallCrop 0.27,0.07,0.46]
@@ -102,6 +103,32 @@ function Save-Ico([System.Drawing.Bitmap[]]$images, [string]$path) {
     }
     foreach ($png in $pngs) { $w.Write($png) }
     $w.Flush()
+    [System.IO.File]::WriteAllBytes($path, $out.ToArray())
+}
+
+function Save-Icns([System.Drawing.Bitmap]$master, [string]$path) {
+    # ICNS with PNG entries; the types and pixel sizes match what macOS's iconutil writes.
+    $entries = [ordered]@{
+        icp4 = 16; ic11 = 32; icp5 = 32; ic12 = 64; ic07 = 128
+        ic13 = 256; ic08 = 256; ic14 = 512; ic09 = 512; ic10 = 1024
+    }
+    $body = [System.IO.MemoryStream]::new()
+    foreach ($type in $entries.Keys) {
+        $img = Resize-Bitmap $master $entries[$type]
+        $ms = [System.IO.MemoryStream]::new()
+        $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+        $img.Dispose()
+        $png = $ms.ToArray()
+        $body.Write([System.Text.Encoding]::ASCII.GetBytes($type), 0, 4)
+        $len = [BitConverter]::GetBytes([uint32](8 + $png.Length)); [Array]::Reverse($len) # big-endian
+        $body.Write($len, 0, 4)
+        $body.Write($png, 0, $png.Length)
+    }
+    $out = [System.IO.MemoryStream]::new()
+    $out.Write([System.Text.Encoding]::ASCII.GetBytes('icns'), 0, 4)
+    $len = [BitConverter]::GetBytes([uint32](8 + $body.Length)); [Array]::Reverse($len)
+    $out.Write($len, 0, 4)
+    $body.WriteTo($out)
     [System.IO.File]::WriteAllBytes($path, $out.ToArray())
 }
 
@@ -215,5 +242,6 @@ $fileIcon = New-FileIcon $ticketArt
 $fileImages = foreach ($s in $IcoSizes) { Resize-Bitmap $fileIcon $s }
 Save-Ico $fileImages (Join-Path $icons 'ferry-file.ico')
 ($fileImages | Where-Object { $_.Width -eq 256 }).Save((Join-Path $icons 'ferry-file.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+Save-Icns $fileIcon (Join-Path $icons 'ferry-file.icns')
 $ticketArt.Dispose()
-Write-Host "File icon: ferry-file.ico and ferry-file.png"
+Write-Host "File icon: ferry-file.ico, ferry-file.png and ferry-file.icns"

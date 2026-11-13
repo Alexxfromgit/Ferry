@@ -54,6 +54,11 @@
       "../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
       "../node_modules/@fontsource-variable/recursive/LICENSE": "LICENSE-Recursive.txt"
     },
+    "macOS": {
+      "files": {
+        "Resources/ferry-file.icns": "icons/ferry-file.icns"
+      }
+    },
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",
