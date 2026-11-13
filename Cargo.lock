@@ -1823,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "age",
  "anyhow",
@@ -1859,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "ferry-core",
