@@ -38,6 +38,7 @@
     try {
       restartNeeded = await api.setSettings(next);
       settings = next;
+      app.showArtwork = next.showArtwork;
       toast("Settings saved");
     } catch (err) {
       toast(message(err), true);
@@ -50,6 +51,14 @@
     if (typeof dir === "string") {
       settings.downloadDir = dir;
       await persist();
+    }
+  }
+
+  async function openLink(open: () => Promise<void>) {
+    try {
+      await open();
+    } catch (err) {
+      toast(message(err), true);
     }
   }
 
@@ -83,6 +92,17 @@
         <span>
           Keep sharing when the window is closed
           <span class="muted hint">Ferry stays in the system tray. Use Quit Ferry from the tray to stop.</span>
+        </span>
+      </label>
+    </section>
+
+    <section class="glass card">
+      <h2>Appearance</h2>
+      <label class="check">
+        <input type="checkbox" bind:checked={settings.showArtwork} onchange={persist} />
+        <span>
+          Show artwork
+          <span class="muted hint">The Ferry mascot behind the app. Turn it off for a plainer look, e.g. when sharing your screen.</span>
         </span>
       </label>
     </section>
@@ -188,6 +208,27 @@
       <p class="version muted hint">Current version <span class="code">{updates.info.version}</span></p>
     {/if}
   </section>
+
+  <section class="glass card about" class:artwork={app.showArtwork} aria-labelledby="about-title">
+    {#if app.showArtwork}
+      <div class="banner" aria-hidden="true"><img src="/art/scene-square.webp" alt="" /></div>
+    {:else}
+      <img class="icon" src="/ferry-icon.png" alt="" width="56" height="56" />
+    {/if}
+    <div class="about-text">
+      <h2 id="about-title">
+        Ferry {#if updates.info}<span class="h-count">{updates.info.version}</span>{/if}
+      </h2>
+      <p class="muted hint">
+        Files go straight from one computer to another, end-to-end encrypted. Free and open
+        source under the MIT license.
+      </p>
+      <div class="links">
+        <button onclick={() => openLink(api.openProjectPage)}>Source code</button>
+        <button class="quiet" onclick={() => openLink(api.openThirdPartyNotices)}>Third-party notices</button>
+      </div>
+    </div>
+  </section>
 </div>
 
 <style>
@@ -283,6 +324,55 @@
     display: flex;
     gap: 0.5rem;
     margin-left: 1.6rem;
+  }
+
+  .about {
+    display: flex;
+    align-items: center;
+    gap: 1.1rem;
+    overflow: hidden;
+  }
+
+  /* The mascot fills the card's left side and fades into it. */
+  .about.artwork {
+    padding: 0 1.2rem 0 0;
+    gap: 0.4rem;
+  }
+
+  /* A close crop of her: the square scene scaled up, head near the top of the card. */
+  .banner {
+    position: relative;
+    flex: none;
+    align-self: stretch;
+    width: 190px;
+    min-height: 168px;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(to right, #000 60%, transparent);
+    mask-image: linear-gradient(to right, #000 60%, transparent);
+  }
+
+  .banner img {
+    position: absolute;
+    width: 380px;
+    left: -12px;
+    top: -88px;
+  }
+
+  .about .icon {
+    flex: none;
+    border-radius: 14px;
+    box-shadow: 0 0 0 1px rgb(255 45 149 / 0.4), 0 0 22px -4px var(--magenta-glow);
+  }
+
+  .about-text {
+    padding: 1rem 0;
+  }
+
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
   }
 
   .restart {

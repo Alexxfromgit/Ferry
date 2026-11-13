@@ -61,6 +61,7 @@ beforeEach(() => {
     list_downloads: () => [],
     node_status: () => ({ nodeId: "n", directAddresses: [] }),
     take_pending_links: () => [],
+    get_settings: () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: true }),
   };
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string, args: unknown) => {
@@ -231,5 +232,56 @@ describe("drag and drop", () => {
     await dropHandler!({ payload: { type: "drop", paths: ["C:/x/Photos", "C:/x/trip.ferry"] } });
     expect(app.view).toBe("send");
     expect(invoke).toHaveBeenCalledWith("create_share", { paths: ["C:/x/Photos", "C:/x/trip.ferry"] });
+  });
+
+  it("tells the overlay whether a drop would open tickets or share files", async () => {
+    const { app } = await freshStore();
+    await dropHandler!({ payload: { type: "enter", paths: ["C:/x/a.FERRY", "C:/x/b.ferry"] } });
+    expect(app.dragging).toBe(true);
+    expect(app.dragKind).toBe("tickets");
+    await dropHandler!({ payload: { type: "leave" } });
+    expect(app.dragging).toBe(false);
+    await dropHandler!({ payload: { type: "enter", paths: ["C:/x/Photos", "C:/x/b.ferry"] } });
+    expect(app.dragKind).toBe("files");
+  });
+});
+
+describe("artwork", () => {
+  it("follows the saved setting", async () => {
+    backend.get_settings = () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: false });
+    const { app } = await freshStore();
+    expect(app.showArtwork).toBe(false);
+  });
+
+  it("stays unknown until settings load, and init waits for them", async () => {
+    let release!: () => void;
+    const loaded = new Promise<void>((done) => (release = done));
+    backend.get_settings = async () => {
+      await loaded;
+      return { downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: false };
+    };
+    vi.resetModules();
+    const { app, init } = await import("./store.svelte");
+    let finished = false;
+    const started = init().then(() => (finished = true));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(app.showArtwork).toBeNull();
+    expect(finished).toBe(false);
+    release();
+    await started;
+    expect(app.showArtwork).toBe(false);
+  });
+
+  it("falls back to showing artwork when settings can't be read, even if startup fails", async () => {
+    backend.get_settings = () => {
+      throw new Error("unreadable");
+    };
+    backend.list_shares = () => {
+      throw new Error("node down");
+    };
+    vi.resetModules();
+    const { app, init } = await import("./store.svelte");
+    await expect(init()).rejects.toThrow("node down");
+    expect(app.showArtwork).toBe(true);
   });
 });

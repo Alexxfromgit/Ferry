@@ -1,16 +1,40 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
-  import { activeDownloadCount, app, init, toast, type View } from "./lib/store.svelte";
+  import { fade } from "svelte/transition";
+  import { activeDownloadCount, app, init, receive, toast, type View } from "./lib/store.svelte";
   import { compactCount, exactCount } from "./lib/format";
   import { message } from "./lib/api";
   import SendView from "./lib/SendView.svelte";
   import ReceiveView from "./lib/ReceiveView.svelte";
   import SettingsView from "./lib/SettingsView.svelte";
   import { initUpdates, updates } from "./lib/updates.svelte";
+  import Scene, { type SceneMode } from "./lib/Scene.svelte";
+  import Splash from "./lib/Splash.svelte";
+  import { motion } from "./lib/motion";
 
   onMount(() => {
-    init().catch((err) => toast(`Ferry couldn't start: ${message(err)}`, true));
+    init()
+      .catch((err) => toast(`Ferry couldn't start: ${message(err)}`, true))
+      .finally(() => (app.ready = true));
     return initUpdates();
+  });
+
+  /** What a drop would do, shown on the overlay and announced to screen readers. */
+  const drop = $derived(
+    app.dragKind === "tickets"
+      ? { title: "Drop to open the ticket", detail: "Ferry shows what's inside before anything downloads." }
+      : { title: "Drop to make a ticket", detail: "The files stay where they are. Ferry shares them from this computer." },
+  );
+
+  /** The mascot is the illustration on an empty screen and recedes once content covers her. */
+  const sceneMode = $derived.by<SceneMode>(() => {
+    if (app.dragging) return "drop";
+    if (app.view === "send") return app.shares.length === 0 && !app.importing ? "hero" : "ambient";
+    if (app.view === "receive") {
+      const busy = receive.preview || receive.problem || receive.protectedTicket;
+      return app.downloads.length === 0 && !busy ? "hero" : "ambient";
+    }
+    return "ambient";
   });
 
   const tabs: { id: View; label: string }[] = [
@@ -70,7 +94,11 @@
   </g>
 </svg>
 
-<div class="shell" class:dragging={app.dragging}>
+{#if app.showArtwork === true}
+  <Scene mode={sceneMode} />
+{/if}
+
+<div class="shell">
   <nav class="glass" aria-label="Main">
     <div class="brand">
       <img src="/ferry-icon.png" alt="" width="40" height="40" />
@@ -123,6 +151,24 @@
     <div class="toast glass" class:error={app.toast.error} role={app.toast.error ? "alert" : "status"}>{app.toast.text}</div>
   {/if}
 </div>
+
+{#if app.dragging}
+  <!-- Shown while files are dragged over the window; the drop itself goes to Tauri. Screen
+       readers get the same words from the live region below, so this copy is hidden from them. -->
+  <div class="drop" class:artwork={app.showArtwork === true} transition:fade={{ duration: motion(150) }} aria-hidden="true">
+    <div class="drop-words">
+      <p class="drop-title">{drop.title}</p>
+      <p class="muted">{drop.detail}</p>
+    </div>
+  </div>
+{/if}
+
+<!-- Always mounted: a live region added together with its text is often not announced. -->
+<p class="sr-only" role="status">{app.dragging ? `${drop.title}. ${drop.detail}` : ""}</p>
+
+{#if !app.ready}
+  <Splash artwork={app.showArtwork === true} />
+{/if}
 
 <style>
   .backdrop {
@@ -261,10 +307,59 @@
     font-size: var(--t-sm);
   }
 
-  .dragging main {
-    outline: 2px dashed var(--magenta);
-    outline-offset: -14px;
-    background: radial-gradient(circle at 50% 40%, var(--magenta-soft), transparent 60%);
+  /* Under the scene (which lights up above it) and over everything else. */
+  .drop {
+    position: fixed;
+    inset: 0;
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    pointer-events: none;
+    padding-left: 210px;
+    background: radial-gradient(circle at 40% 45%, rgb(255 45 149 / 0.14), transparent 60%), rgb(8 6 11 / 0.86);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+
+  .drop::before {
+    content: "";
+    position: absolute;
+    inset: 14px;
+    border: 2px dashed rgb(255 45 149 / 0.7);
+    border-radius: 18px;
+  }
+
+  /* With the scene on the right, the words centre in the space left of her. */
+  .drop.artwork {
+    padding-right: min(56.3vh, 60vw);
+  }
+
+  .drop-words {
+    display: grid;
+    gap: 0.5rem;
+    max-width: 26em;
+    margin: 0 1rem;
+    padding: 1.3rem 1.6rem;
+    text-align: center;
+    /* Readable on its own, even where the backdrop blur isn't available. */
+    background: rgb(8 6 11 / 0.82);
+    border: 1px solid rgb(255 45 149 / 0.3);
+    border-radius: 16px;
+    box-shadow: 0 0 40px -12px var(--magenta-glow);
+  }
+
+  .drop-title {
+    font-size: var(--t-2xl);
+    font-weight: 780;
+    letter-spacing: -0.025em;
+    line-height: 1.15;
+    text-shadow: 0 0 24px var(--magenta-glow);
+  }
+
+  @media (max-width: 820px) {
+    .drop {
+      padding-left: 0;
+    }
   }
 
   .toast {

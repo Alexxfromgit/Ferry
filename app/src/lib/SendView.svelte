@@ -54,8 +54,11 @@
     {#if app.shares.length > 0}<span class="h-count">{exactCount(app.shares.length)}</span>{/if}
   </h2>
   {#if app.shares.length === 0}
-    <div class="empty glass">
-      <img src="/ferry-icon.png" alt="" width="96" height="96" />
+    <!-- With the artwork on, the mascot behind the page is this screen's illustration. -->
+    <div class="empty" class:glass={app.showArtwork === false} class:bare={app.showArtwork !== false}>
+      {#if app.showArtwork === false}
+        <img src="/ferry-icon.png" alt="" width="96" height="96" />
+      {/if}
       <p class="muted">
         Nothing is shared yet. Your first ticket will show up here, with a link to copy and a QR
         code for phones.
@@ -121,6 +124,11 @@
     max-width: 620px;
     padding: 1rem 1.2rem;
     border-radius: 14px;
+  }
+
+  .empty.bare {
+    max-width: 44ch;
+    padding: 0;
   }
 
   .empty img {

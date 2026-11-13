@@ -58,12 +58,29 @@
       "signingIdentity": "-",
       "files": {
         "Resources/ferry-file.icns": "icons/ferry-file.icns"
+      },
+      "dmg": {
+        "background": "macos/dmg-background.png",
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 400,
+          "y": 200
+        },
+        "applicationFolderPosition": {
+          "x": 570,
+          "y": 200
+        }
       }
     },
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",
-        "installerHooks": "windows/hooks.nsh"
+        "installerHooks": "windows/hooks.nsh",
+        "headerImage": "windows/nsis-header.bmp",
+        "sidebarImage": "windows/nsis-sidebar.bmp"
       },
       "wix": {
         "fragmentPaths": [
@@ -71,7 +88,9 @@
         ],
         "componentRefs": [
           "FerryFileIcon"
-        ]
+        ],
+        "bannerPath": "windows/wix-banner.bmp",
+        "dialogImagePath": "windows/wix-dialog.bmp"
       }
     }
   },

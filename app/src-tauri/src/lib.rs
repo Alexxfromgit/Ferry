@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{
     AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
     menu::{Menu, MenuItem},
+    path::BaseDirectory,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -41,11 +42,21 @@ struct Settings {
     close_to_tray: bool,
     #[serde(default = "default_auto_check_updates")]
     auto_check_updates: bool,
+    /// Show the mascot artwork behind the UI. Missing from settings saved before it existed.
+    #[serde(default = "yes")]
+    show_artwork: bool,
 }
 
 fn default_auto_check_updates() -> bool {
     true
 }
+
+fn yes() -> bool {
+    true
+}
+
+/// Where "Source code" in Settings → About leads. Fixed here so the webview can't open other URLs.
+const PROJECT_PAGE: &str = "https://github.com/Alexxfromgit/Ferry";
 
 struct AppState {
     node: Node,
@@ -80,6 +91,7 @@ fn load_settings(path: &Path, default_download_dir: PathBuf) -> Settings {
         relay: RelayChoice::Default,
         close_to_tray: true,
         auto_check_updates: default_auto_check_updates(),
+        show_artwork: true,
     };
     let Some(mut settings) = std::fs::read(path)
         .ok()
@@ -270,6 +282,26 @@ fn set_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult
     let restart = settings.relay != *state.node.relay();
     *saved = settings;
     Ok(restart)
+}
+
+#[tauri::command]
+fn open_project_page(app: AppHandle) -> CmdResult<()> {
+    app.opener()
+        .open_url(PROJECT_PAGE, None::<&str>)
+        .map_err(fail)
+}
+
+/// Opens the bundled third-party notices, or shows the file if nothing opens Markdown.
+#[tauri::command]
+fn open_third_party_notices(app: AppHandle) -> CmdResult<()> {
+    let path = app
+        .path()
+        .resolve("THIRD_PARTY_NOTICES.md", BaseDirectory::Resource)
+        .map_err(fail)?;
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .or_else(|_| app.opener().reveal_item_in_dir(&path))
+        .map_err(fail)
 }
 
 /// Links that arrived from outside (deep link, opened file, second launch) since last asked.
@@ -563,6 +595,8 @@ pub fn run() {
             #[cfg(desktop)]
             updates::install_update,
             take_pending_links,
+            open_project_page,
+            open_third_party_notices,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Ferry");
@@ -624,6 +658,7 @@ mod tests {
             relay: RelayChoice::Custom("https://relay.example.com".into()),
             close_to_tray: true,
             auto_check_updates: true,
+            show_artwork: true,
         };
         assert!(validate_settings(&ok).is_ok());
         let bad_relay = Settings {
@@ -649,6 +684,24 @@ mod tests {
         assert!(settings.auto_check_updates);
         assert!(!settings.close_to_tray);
         assert_eq!(settings.relay, RelayChoice::Disabled);
+    }
+
+    #[test]
+    fn settings_saved_before_artwork_existed_still_load() {
+        let dir = tempfile_dir();
+        let path = dir.join("old-settings.json");
+        let saved = dir.join("Saved here");
+        let json = serde_json::json!({
+            "downloadDir": saved,
+            "relay": { "mode": "disabled" },
+            "closeToTray": false,
+        });
+        std::fs::write(&path, json.to_string()).unwrap();
+        let settings = load_settings(&path, std::env::temp_dir());
+        assert_eq!(settings.download_dir, saved);
+        assert!(!settings.close_to_tray);
+        assert!(settings.show_artwork);
+        assert!(settings.auto_check_updates);
     }
 
     fn tempfile_dir() -> PathBuf {

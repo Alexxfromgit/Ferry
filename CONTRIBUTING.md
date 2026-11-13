@@ -41,7 +41,9 @@ set `$env:UPDATE_CONTRACT = '1'` before running that test and clear it afterward
 `app/src/lib/types.ts` as needed and run the frontend type check.
 
 When changing the app or ticket icon, update its source under `app/src-tauri/icons/` and run
-`pwsh -File scripts/make-icons.ps1` on Windows. After dependency updates, regenerate
+`pwsh -File scripts/make-icons.ps1` on Windows. When changing the mascot artwork, update its
+source under `branding/art/` and run `python3 scripts/make-art.py` (needs Pillow with WebP
+support). It writes the in-app images and the installer images. After dependency updates, regenerate
 `THIRD_PARTY_NOTICES.md` with `node scripts/third-party-notices.mjs` after installing the app dependencies.
 
 ## macOS smoke test
