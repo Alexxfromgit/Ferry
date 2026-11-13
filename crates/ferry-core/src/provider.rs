@@ -177,8 +177,17 @@ impl ProviderState {
         self.revoked.send_modify(|n| *n += 1);
     }
 
-    fn is_shared(&self, hash: &Hash) -> bool {
-        self.shared.read().unwrap().contains_key(hash)
+    /// Admit a request for `hash` if the share is served, noting the generation it is served
+    /// in. This happens before permission is sent, so a request admitted before the share is
+    /// turned off is ended even if the share is turned on again before it is tracked. The
+    /// subscription is made first, so a share turned off right after this is noticed too.
+    fn admit(&self, hash: &Hash) -> Option<Admission> {
+        let revoked = self.revoked.subscribe();
+        let generation = self.generation(hash)?;
+        Some(Admission {
+            generation,
+            revoked,
+        })
     }
 
     /// The current generation of a served share, if it is served.
@@ -337,13 +346,19 @@ pub async fn run(state: Arc<ProviderState>, mut rx: mpsc::Receiver<ProviderMessa
         match msg {
             ProviderMessage::GetRequestReceived(msg) => {
                 let hash = msg.inner.request.hash;
-                if state.is_shared(&hash) {
+                if let Some(admission) = state.admit(&hash) {
                     msg.tx.send(Ok(())).await.ok();
                     let request = Request {
                         key: (msg.inner.connection_id, msg.inner.request_id),
                         ranges: msg.inner.request.ranges.clone(),
                     };
-                    tokio::spawn(track_request(state.clone(), hash, request, msg.rx));
+                    tokio::spawn(track_request(
+                        state.clone(),
+                        hash,
+                        admission,
+                        request,
+                        msg.rx,
+                    ));
                 } else {
                     tracing::debug!(%hash, "refusing request for a hash that is not shared");
                     msg.tx.send(Err(AbortReason::Permission)).await.ok();
@@ -368,21 +383,29 @@ struct Request {
     ranges: ChunkRangesSeq,
 }
 
+/// A request let through: the generation of the share it was let through in, and a
+/// subscription to revocations made before that generation was read.
+struct Admission {
+    generation: u64,
+    revoked: watch::Receiver<u64>,
+}
+
 async fn track_request(
     state: Arc<ProviderState>,
     hash: Hash,
+    admission: Admission,
     request: Request,
     mut rx: irpc::channel::mpsc::Receiver<RequestUpdate>,
 ) {
     let Request { key, ranges } = request;
-    // Subscribe before checking, so a share turned off from here on is noticed below.
-    let mut revoked = state.revoked.subscribe();
+    let Admission {
+        generation,
+        mut revoked,
+    } = admission;
     let stop = || tracing::info!(%hash, request = ?key, "share turned off; ending a transfer");
-    // Everything below belongs to the share being served in this generation. If it is turned
-    // off (even if it is turned on again before this task notices), the transfer ends.
-    let Some(generation) = state.generation(&hash) else {
-        return stop();
-    };
+    // Everything below belongs to the share as served in the generation the request was
+    // admitted in. If it is turned off (even if it is turned on again before this task runs or
+    // notices), the transfer ends.
     let Some(requested) = state.requested_bytes(&hash, &ranges).await else {
         return stop();
     };
@@ -633,6 +656,66 @@ mod tests {
         state.forget(&hash, &(1, 2));
         assert!(!state.with_stats(hash, again, |s| s.uploaded += 1));
         assert!(state.take_changes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_request_admitted_before_turning_off_and_on_is_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(ProviderState::new(FileLists::new(dir.path().to_path_buf())));
+        let hash = Hash::new(b"share");
+        state.allow(hash, 1000, Some(Arc::from([1000u64])));
+        let all = || {
+            ChunkRangesSeq::from_ranges_infinite([
+                ChunkRanges::all(),
+                ChunkRanges::all(),
+                ChunkRanges::all(),
+            ])
+        };
+        let receivers = |state: &ProviderState| {
+            state
+                .stats
+                .lock()
+                .unwrap()
+                .get(&hash)
+                .map_or(0, |s| s.requests.len())
+        };
+
+        // Admitted (and so given permission), then the share is turned off and on again
+        // before the tracker runs.
+        let stale = state.admit(&hash).unwrap();
+        state.pause(&hash);
+        state.allow(hash, 1000, None);
+        let (tx, rx) = irpc::channel::mpsc::channel::<RequestUpdate>(8);
+        let request = Request {
+            key: (1, 1),
+            ranges: all(),
+        };
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            track_request(state.clone(), hash, stale, request, rx),
+        )
+        .await
+        .expect("the stale request must end at once");
+        assert_eq!(receivers(&state), 0, "a stale request is never registered");
+        drop(tx);
+
+        // A request admitted in the current generation is tracked until it ends.
+        let current = state.admit(&hash).unwrap();
+        let (tx, rx) = irpc::channel::mpsc::channel::<RequestUpdate>(8);
+        let request = Request {
+            key: (2, 1),
+            ranges: all(),
+        };
+        let task = tokio::spawn(track_request(state.clone(), hash, current, request, rx));
+        while receivers(&state) == 0 {
+            tokio::task::yield_now().await;
+        }
+        state.pause(&hash);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("turning off ends a tracked request")
+            .unwrap();
+        drop(tx);
     }
 
     #[test]

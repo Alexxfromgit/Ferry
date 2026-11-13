@@ -309,6 +309,104 @@ async fn a_share_turned_off_is_refused_until_turned_on_again() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn turning_off_reports_a_failed_save_but_stays_off() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("notes.txt");
+    std::fs::write(&file, content(50_000, 7)).unwrap();
+    let sender_dir = tmp.path().join("sender");
+    let sender = node(&sender_dir).await;
+    let receiver = node(&tmp.path().join("receiver")).await;
+    let share = sender.create_share(vec![file]).await.unwrap();
+    let link = ShareLink::parse(&share.link).unwrap();
+
+    // A folder where the registry goes makes saving it fail.
+    let registry = sender_dir.join("registry.json");
+    std::fs::remove_file(&registry).unwrap();
+    std::fs::create_dir(&registry).unwrap();
+    let mut events = sender.subscribe();
+    let err = sender.set_share_paused(&share.id, true).await.unwrap_err();
+    assert!(format!("{err:#}").contains("sharing is off now"), "{err:#}");
+    assert!(sender.share(&share.id).unwrap().paused, "it is off anyway");
+    let mut announced = false;
+    while let Ok(event) = events.try_recv() {
+        if let Event::ShareUpdated { share: updated } = event {
+            announced |= updated.id == share.id && updated.paused;
+        }
+    }
+    assert!(announced, "the change is still announced");
+    assert!(receiver.preview(&link).await.is_err());
+
+    // Once saving works again, the off state is saved and survives a restart.
+    std::fs::remove_dir(&registry).unwrap();
+    sender.set_share_paused(&share.id, true).await.unwrap();
+    sender.shutdown().await.unwrap();
+    drop(sender);
+    let sender = node(&sender_dir).await;
+    assert!(sender.list_shares()[0].paused);
+
+    sender.shutdown().await.unwrap();
+    receiver.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_and_sharing_the_same_files_at_once_stay_consistent() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("a.bin");
+    std::fs::write(&file, content(200_000, 9)).unwrap();
+    let sender = node(&tmp.path().join("sender")).await;
+    let id = sender.create_share(vec![file.clone()]).await.unwrap().id;
+    for round in 0..20 {
+        let mut events = sender.subscribe();
+        // Remove the share just as the same files, shared again, are being committed (the
+        // last import progress is sent once their tag is written).
+        let mut progress = sender.subscribe();
+        let remover = {
+            let (sender, id) = (sender.clone(), id.clone());
+            tokio::spawn(async move {
+                loop {
+                    if let Ok(Event::ImportProgress {
+                        done_bytes,
+                        total_bytes,
+                        current_file,
+                        ..
+                    }) = progress.recv().await
+                        && done_bytes == total_bytes
+                        && current_file.is_empty()
+                    {
+                        break;
+                    }
+                }
+                sender.remove_share(&id).await
+            })
+        };
+        // Sharing the same files gives the same (content-addressed) id.
+        let created = sender.create_share(vec![file.clone()]).await.unwrap();
+        assert_eq!(created.id, id);
+        remover.await.unwrap().unwrap();
+        let listed = sender.share(&id).is_some();
+        // The last event about the share agrees with whether it is still there.
+        let mut last = None;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                Event::ShareCreated { share } if share.id == id => last = Some(true),
+                Event::ShareRemoved { share_id } if share_id == id => last = Some(false),
+                _ => {}
+            }
+        }
+        assert_eq!(last, Some(listed), "round {round}");
+        if listed {
+            // The removal did not take the file list of the share created again.
+            sender.share_files(&id).unwrap();
+        } else {
+            sender.create_share(vec![file.clone()]).await.unwrap();
+        }
+    }
+    sender.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn shares_and_identity_survive_restart() {
     init_tracing();
     let tmp = tempfile::tempdir().unwrap();

@@ -36,8 +36,16 @@ export async function setSharing(share: ShareInfo, on: boolean) {
     delete app.shareProblems[share.id];
     toast(on ? `Sharing ${share.name} again` : `Stopped sharing ${share.name} for now`);
   } catch (err) {
-    if (!app.shares.some((s) => s.id === share.id)) {
+    // The change can be made but not saved (the error then says what that means after a
+    // restart), so go by the share as it is now, not by the error alone.
+    const now = await api.getShare(share.id).catch(() => undefined);
+    if (!now) {
       // Removed meanwhile; nothing left to turn on.
+    } else if (now.paused === !on) {
+      const i = app.shares.findIndex((s) => s.id === now.id);
+      if (i >= 0) app.shares[i] = now;
+      if (on) delete app.shareProblems[share.id];
+      toast(message(err).replace(/^./, (c) => c.toUpperCase()), true);
     } else if (on) {
       app.shareProblems[share.id] = message(err);
       toast(`Couldn't turn ${share.name} back on. See its ticket for why.`, true);
