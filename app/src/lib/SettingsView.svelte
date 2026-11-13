@@ -4,6 +4,13 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, message } from "./api";
   import { app, toast } from "./store.svelte";
+  import {
+    checkForUpdates,
+    restartToUpdate,
+    setAutoCheck,
+    transferring,
+    updates,
+  } from "./updates.svelte";
   import type { Settings } from "./types";
 
   let settings = $state<Settings | null>(null);
@@ -11,6 +18,7 @@
   let relayUrl = $state("");
   /** True while the saved relay differs from the one Ferry is running with. */
   let restartNeeded = $state(false);
+  const canUpdate = $derived(updates.info?.support === "available");
 
   onMount(() => {
     api.getSettings().then((s) => {
@@ -55,8 +63,8 @@
 
 <h1>Settings</h1>
 
-{#if settings}
-  <div class="groups">
+<div class="groups">
+  {#if settings}
     <section class="glass card">
       <h2>Downloads</h2>
       <div class="field">
@@ -134,8 +142,53 @@
         <p class="muted hint block">Home relay: <span class="code">{app.status.relayUrl}</span></p>
       {/if}
     </section>
-  </div>
-{/if}
+  {/if}
+  <section class="glass card">
+    <h2 id="updates-heading" tabindex="-1">Updates</h2>
+    {#if updates.info}
+      <label class="check">
+        <input
+          type="checkbox"
+          bind:checked={() => canUpdate && (updates.info?.autoCheck ?? false), setAutoCheck}
+          disabled={!canUpdate || updates.saving}
+        />
+        <span>Check for updates automatically</span>
+      </label>
+      <div class="update-actions">
+        <button
+          onclick={() => checkForUpdates()}
+          disabled={!canUpdate || updates.checking || updates.installing || !!updates.info.readyVersion}
+        >Check now</button>
+        {#if updates.info.readyVersion}
+          <button onclick={restartToUpdate} disabled={updates.installing || updates.checking || transferring()}>
+            Restart to update
+          </button>
+        {/if}
+      </div>
+    {/if}
+    {#if updates.info?.support === "packageManager"}
+      <p class="muted hint">Install the latest Ferry .deb through your package manager.</p>
+    {:else if updates.info?.support === "unavailable"}
+      <p class="muted hint">In-app updates are available in supported GitHub release builds.</p>
+    {/if}
+    <div role="status">
+      {#if updates.installing}
+        <p class="muted hint">Installing update…</p>
+      {:else if updates.checking}
+        <p class="muted hint">Checking for and downloading updates…</p>
+      {:else if updates.info?.readyVersion}
+        <p class="muted hint">
+          Ferry {updates.info.readyVersion} is ready to install.
+          {#if transferring()}Wait for active transfers to finish before restarting.{/if}
+        </p>
+      {/if}
+      {#if updates.status}<p class="muted hint">{updates.status}</p>{/if}
+    </div>
+    {#if updates.info}
+      <p class="version muted hint">Current version <span class="code">{updates.info.version}</span></p>
+    {/if}
+  </section>
+</div>
 
 <style>
   h1 {
@@ -236,5 +289,16 @@
     margin-top: 0.75rem;
     font-weight: 650;
     color: var(--danger);
+  }
+
+  .update-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin: 0.7rem 0;
+  }
+
+  .version {
+    margin-top: 0.75rem;
   }
 </style>

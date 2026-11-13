@@ -82,6 +82,13 @@ export interface Settings {
   closeToTray: boolean;
 }
 
+export interface UpdateInfo {
+  version: string;
+  support: "available" | "packageManager" | "unavailable";
+  autoCheck: boolean;
+  readyVersion: string | null;
+}
+
 export type FerryEvent =
   | { type: "importProgress"; opId: number; doneBytes: number; totalBytes: number; currentFile: string }
   | { type: "shareCreated"; share: ShareInfo }

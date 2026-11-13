@@ -333,6 +333,13 @@ impl Node {
         }
     }
 
+    /// Commit pending store changes before handing off to an installer that exits the process.
+    #[cfg(windows)]
+    pub async fn flush_store(&self) -> anyhow::Result<()> {
+        self.inner.store.sync_db().await?;
+        Ok(())
+    }
+
     /// Stop serving and close the store. Active downloads resume on the next start.
     pub async fn shutdown(&self) -> anyhow::Result<()> {
         self.inner.downloads.lock().unwrap().clear();

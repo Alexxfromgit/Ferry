@@ -26,6 +26,11 @@ If there are no installers yet, you can [build Ferry from source](#build-from-so
 | macOS | `.dmg` or `.pkg` for Apple silicon (arm64) or Intel (x64) |
 | Linux x64 | `.deb` or `.AppImage` built on Ubuntu 22.04 |
 
+Under **Settings → Updates**, Ferry shows its current version and can check for updates
+automatically or on demand. Signed GitHub release builds for Windows, macOS, and AppImage
+download updates in the background and install them when you choose **Restart to update**.
+Update the Debian package through your package manager.
+
 Ferry is an early desktop release. Windows has received manual testing. macOS and Linux
 desktop testing is in progress. Initial Windows installers are unsigned and macOS builds
 are unnotarized. The [release guide](docs/RELEASING.md#verifying-downloads) explains how

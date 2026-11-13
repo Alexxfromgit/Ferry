@@ -1,14 +1,16 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { activeDownloadCount, app, init, toast, type View } from "./lib/store.svelte";
   import { compactCount, exactCount } from "./lib/format";
   import { message } from "./lib/api";
   import SendView from "./lib/SendView.svelte";
   import ReceiveView from "./lib/ReceiveView.svelte";
   import SettingsView from "./lib/SettingsView.svelte";
+  import { initUpdates, updates } from "./lib/updates.svelte";
 
   onMount(() => {
     init().catch((err) => toast(`Ferry couldn't start: ${message(err)}`, true));
+    return initUpdates();
   });
 
   const tabs: { id: View; label: string }[] = [
@@ -26,6 +28,12 @@
 
   function badgeText(b: { n: number; one: string; many: string }): string {
     return `${exactCount(b.n)} ${b.n === 1 ? b.one : b.many}`;
+  }
+
+  async function viewUpdate() {
+    app.view = "settings";
+    await tick();
+    document.getElementById("updates-heading")?.focus();
   }
 
   const reach = $derived.by(() => {
@@ -96,6 +104,12 @@
   </nav>
 
   <main>
+    {#if updates.info?.readyVersion && app.view !== "settings"}
+      <div class="update-banner glass" role="status">
+        <span>Ferry {updates.info.readyVersion} is ready to install.</span>
+        <button onclick={viewUpdate}>View update</button>
+      </div>
+    {/if}
     {#if app.view === "send"}
       <SendView />
     {:else if app.view === "receive"}
@@ -235,6 +249,16 @@
   main {
     overflow-y: auto;
     padding: 2.2rem 2.6rem 3rem;
+  }
+
+  .update-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 0.9rem;
+    margin-bottom: 1rem;
+    font-size: var(--t-sm);
   }
 
   .dragging main {

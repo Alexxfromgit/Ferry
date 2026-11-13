@@ -3,6 +3,7 @@
 
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
+import { version } from "../../package.json";
 import type { DownloadInfo, ShareInfo } from "./types";
 
 const now = Math.floor(Date.now() / 1000);
@@ -91,6 +92,8 @@ export function installDevPreview() {
           return fakeQr;
         case "get_settings":
           return { downloadDir: "C:\\Users\\alex\\Downloads", relay: { mode: "default" }, closeToTray: true };
+        case "update_info":
+          return { version, support: "unavailable", autoCheck: true, readyVersion: null };
         case "take_pending_links":
           return [];
         case "preview":

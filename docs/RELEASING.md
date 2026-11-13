@@ -7,7 +7,8 @@ creates a version tag and draft GitHub release.
 
 The Release workflow builds installers for Windows x64, Apple silicon and Intel Macs,
 and Linux x64. It runs CI against the tagged source and publishes the draft when all checks
-and builds pass and the installers have SHA-256 checksums and GitHub build attestations.
+and builds pass. It uploads SHA-256 checksums, GitHub build attestations, and a Tauri
+update feed with signed packages for Windows MSI and NSIS, both Macs, and Linux AppImage.
 
 ## Configure automation
 
@@ -17,6 +18,31 @@ or a repository-scoped fine-grained personal access token with **Contents** and
 lets the generated release PR trigger its CI checks. Run **Release** on `main` after adding
 the secret to start Release Please.
 [Release Please Action](https://github.com/googleapis/release-please-action)
+
+### Configure updater signing
+
+Generate a dedicated Tauri updater key from the repository root after installing
+the app dependencies. Use a path outside the repository and keep a secure backup of
+the private key and its password.
+
+```sh
+npm --prefix app run tauri -- signer generate -w "$HOME/ferry-updater.key"
+```
+
+In the repository's **Settings → Secrets and variables → Actions**, set these values.
+
+| Kind | Name | Value |
+| --- | --- | --- |
+| Variable | `FERRY_UPDATER_PUBLIC_KEY` | Contents of `ferry-updater.key.pub` |
+| Secret | `TAURI_SIGNING_PRIVATE_KEY` | Contents of `ferry-updater.key` |
+| Secret | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The password chosen when generating the key, if any |
+
+Keep the same signing key for subsequent releases so installed copies can verify updates.
+The release workflow embeds the public key in each build and checks that the generated
+signatures identify that key and cover the tagged version before publishing `latest.json`.
+Local builds can exercise signing by supplying the same environment variables with a test
+key. Tauri updater signing is independent of OS code signing.
+[Tauri updater](https://v2.tauri.app/plugin/updater/)
 
 ## Build a draft release
 
