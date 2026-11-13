@@ -29,6 +29,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 const share = (id: string, extra: Partial<ShareInfo> = {}): ShareInfo => ({
   ...sampleShares[0],
   id,
+  paused: false,
   ...extra,
 });
 const download = (id: string, extra: Partial<DownloadInfo> = {}): DownloadInfo => ({
@@ -36,6 +37,12 @@ const download = (id: string, extra: Partial<DownloadInfo> = {}): DownloadInfo =
   id,
   ...extra,
 });
+const activity = {
+  activePeers: 1,
+  uploadedBytes: 5,
+  bytesPerSec: 2048,
+  receivers: [{ id: 1, doneBytes: 5, totalBytes: 42, bytesPerSec: 2048, etaSecs: 1 }],
+};
 const preview = (name: string): Preview => ({ id: name, name, files: [], fileCount: 0, totalSize: 0 });
 
 /** Default backend: empty lists, no pending links. Tests override single commands. */
@@ -92,12 +99,68 @@ describe("events", () => {
   it("forgets the activity of a removed share and ignores activity for unknown shares", async () => {
     const { app } = await freshStore();
     emit({ type: "shareCreated", share: share("s1") });
-    emit({ type: "shareActivity", shareId: "s1", activePeers: 1, uploadedBytes: 5 });
-    emit({ type: "shareActivity", shareId: "ghost", activePeers: 1, uploadedBytes: 5 });
+    emit({ type: "shareActivity", shareId: "s1", ...activity });
+    emit({ type: "shareActivity", shareId: "ghost", ...activity });
     expect(Object.keys(app.activity)).toEqual(["s1"]);
     emit({ type: "shareRemoved", shareId: "s1" });
     expect(app.shares).toEqual([]);
     expect(app.activity).toEqual({});
+  });
+
+  it("keeps each receiver's progress and clears it when a share is turned off", async () => {
+    const { app } = await freshStore();
+    emit({ type: "shareCreated", share: share("s1") });
+    emit({ type: "shareActivity", shareId: "s1", ...activity });
+    expect(app.activity.s1.receivers).toHaveLength(1);
+    expect(app.activity.s1.bytesPerSec).toBe(2048);
+
+    emit({ type: "shareUpdated", share: share("s1", { paused: true }) });
+    expect(app.shares[0].paused).toBe(true);
+    expect(app.activity.s1).toEqual({ activePeers: 0, uploadedBytes: 5, bytesPerSec: 0, receivers: [] });
+  });
+
+  it("ignores a late snapshot for a share that is off, and starts clean once it is on", async () => {
+    const { app } = await freshStore();
+    emit({ type: "shareCreated", share: share("s1") });
+    emit({ type: "shareUpdated", share: share("s1", { paused: true }) });
+    // Taken just before the share was turned off, delivered after.
+    emit({ type: "shareActivity", shareId: "s1", ...activity });
+    expect(app.activity.s1?.receivers ?? []).toEqual([]);
+
+    emit({ type: "shareUpdated", share: share("s1", { paused: false }) });
+    emit({ type: "shareActivity", shareId: "s1", ...activity });
+    expect(app.activity.s1.receivers).toHaveLength(1);
+    emit({ type: "shareUpdated", share: share("s1", { paused: false }) });
+    expect(app.activity.s1.receivers).toEqual([]);
+    expect(app.activity.s1.uploadedBytes).toBe(5);
+  });
+
+  it("forgets a share's problem once it is back on", async () => {
+    const { app } = await freshStore();
+    emit({ type: "shareCreated", share: share("s1", { paused: true }) });
+    app.shareProblems.s1 = "a.txt was moved";
+    emit({ type: "shareUpdated", share: share("s1", { paused: false }) });
+    expect(app.shareProblems).toEqual({});
+  });
+
+  it("remembers the list layout", async () => {
+    const saved = new Map<string, string>();
+    // Node's own `localStorage` is an accessor, so replace the property itself.
+    const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (k: string) => saved.get(k) ?? null,
+        setItem: (k: string, v: string) => void saved.set(k, v),
+      },
+    });
+    const store = await freshStore();
+    expect(store.app.shareLayout).toBe("tickets");
+    store.setShareLayout("compact");
+    const again = await freshStore();
+    expect(again.app.shareLayout).toBe("compact");
+    if (original) Object.defineProperty(globalThis, "localStorage", original);
+    else delete (globalThis as { localStorage?: unknown }).localStorage;
   });
 
   it("reloads everything on resync and refreshes links", async () => {

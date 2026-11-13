@@ -2,7 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, message } from "./api";
 import { plural } from "./format";
-import type { DownloadInfo, FerryEvent, NodeStatus, Preview, ShareInfo } from "./types";
+import type { DownloadInfo, FerryEvent, NodeStatus, Preview, ShareActivity, ShareInfo } from "./types";
 
 export type View = "send" | "receive" | "settings";
 export type DragKind = "files" | "tickets";
@@ -12,17 +12,25 @@ export function dragKind(paths: string[]): DragKind {
   return paths.length > 0 && paths.every((x) => x.toLowerCase().endsWith(".ferry")) ? "tickets" : "files";
 }
 
+/** How the Send tab lists shares: full tickets, or one-line strips. */
+export type ShareLayout = "tickets" | "compact";
+
 interface Importing {
   doneBytes: number;
   totalBytes: number;
   currentFile: string;
 }
 
+const LAYOUT_KEY = "ferry.sendView";
+
 export const app = $state({
   view: "send" as View,
   status: null as NodeStatus | null,
   shares: [] as ShareInfo[],
-  activity: {} as Record<string, { activePeers: number; uploadedBytes: number }>,
+  activity: {} as Record<string, ShareActivity>,
+  /** Why a share couldn't be turned back on (its files changed), by share id. */
+  shareProblems: {} as Record<string, string>,
+  shareLayout: loadShareLayout(),
   downloads: [] as DownloadInfo[],
   importing: null as Importing | null,
   dragging: false,
@@ -51,6 +59,23 @@ export const receive = $state({
   dest: null as string | null,
   starting: false,
 });
+
+function loadShareLayout(): ShareLayout {
+  try {
+    return globalThis.localStorage?.getItem(LAYOUT_KEY) === "compact" ? "compact" : "tickets";
+  } catch {
+    return "tickets";
+  }
+}
+
+export function setShareLayout(layout: ShareLayout) {
+  app.shareLayout = layout;
+  try {
+    globalThis.localStorage?.setItem(LAYOUT_KEY, layout);
+  } catch {
+    // Storage can be unavailable; the choice then lasts until Ferry closes.
+  }
+}
 
 const ACTIVE_DOWNLOAD = ["connecting", "downloading", "exporting"];
 
@@ -86,16 +111,31 @@ function onEvent(event: FerryEvent) {
       break;
     case "shareCreated":
       app.shares = [event.share, ...app.shares.filter((s) => s.id !== event.share.id)];
+      delete app.shareProblems[event.share.id];
       break;
     case "shareRemoved":
       app.shares = app.shares.filter((s) => s.id !== event.shareId);
       delete app.activity[event.shareId];
+      delete app.shareProblems[event.shareId];
       break;
+    case "shareUpdated": {
+      const i = app.shares.findIndex((s) => s.id === event.share.id);
+      if (i >= 0) app.shares[i] = event.share;
+      if (!event.share.paused) delete app.shareProblems[event.share.id];
+      // Turning a share off or on ends every transfer; keep only the total sent. (A snapshot
+      // taken just before may still arrive; it is ignored below while the share is off, and
+      // replaced by fresh ones once it is on.)
+      const a = app.activity[event.share.id];
+      if (a) app.activity[event.share.id] = { ...a, activePeers: 0, bytesPerSec: 0, receivers: [] };
+      break;
+    }
     case "shareActivity":
-      if (app.shares.some((s) => s.id === event.shareId)) {
+      if (app.shares.some((s) => s.id === event.shareId && !(s.paused && event.receivers.length > 0))) {
         app.activity[event.shareId] = {
           activePeers: event.activePeers,
           uploadedBytes: event.uploadedBytes,
+          bytesPerSec: event.bytesPerSec,
+          receivers: event.receivers,
         };
       }
       break;
@@ -128,7 +168,8 @@ async function takeIncoming() {
   }
 }
 
-export async function share(paths: string[]) {
+/** Share files; resolves to the new share, or undefined if it didn't happen. */
+export async function share(paths: string[]): Promise<ShareInfo | undefined> {
   if (paths.length === 0) return;
   if (app.importing) {
     toast("Ferry is still preparing the previous ticket. Try again when it's done.", true);
@@ -143,6 +184,7 @@ export async function share(paths: string[]) {
         ? `Sharing ${created.name}. ${plural(left, "item was", "items were")} left out; see the ticket.`
         : `Sharing ${created.name}`,
     );
+    return created;
   } catch (err) {
     toast(`Couldn't share: ${message(err)}`, true);
   } finally {

@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-  import { ask, save } from "@tauri-apps/plugin-dialog";
+  import { save } from "@tauri-apps/plugin-dialog";
   import { api, message } from "./api";
-  import { bytes, plural, shortId, shortPath } from "./format";
+  import { bytes, duration, plural, shortId, shortPath } from "./format";
+  import { copyLink, removeShare, setSharing, shareAgain, statusLine } from "./shareActions";
+  import ShareSwitch from "./ShareSwitch.svelte";
   import { app, toast } from "./store.svelte";
-  import type { ShareInfo, SkipReason } from "./types";
+  import type { ReceiverProgress, ShareActivity, ShareInfo, SkipReason } from "./types";
 
-  let { share, activity }: { share: ShareInfo; activity?: { activePeers: number; uploadedBytes: number } } =
-    $props();
+  let { share, activity }: { share: ShareInfo; activity?: ShareActivity } = $props();
 
   let qr = $state<string | null>(null);
   let qrDialog = $state<HTMLDialogElement | null>(null);
@@ -36,7 +36,36 @@
       year: "numeric",
     }),
   );
-  const live = $derived((activity?.activePeers ?? 0) > 0);
+  const paused = $derived(share.paused === true);
+  const receivers = $derived(paused ? [] : (activity?.receivers ?? []));
+  const live = $derived(receivers.length > 0);
+  const problem = $derived(app.shareProblems[share.id]);
+  const percent = (done: number, total: number) => (total > 0 ? Math.min(100, (done / total) * 100) : 0);
+
+  // Each receiver keeps its passenger number while it downloads, even when others finish.
+  const passengers = new Map<number, number>();
+  function passengerNo(id: number): number {
+    for (const known of passengers.keys()) {
+      if (!receivers.some((r) => r.id === known)) passengers.delete(known);
+    }
+    let n = passengers.get(id);
+    if (n === undefined) {
+      const taken = new Set(passengers.values());
+      n = 1;
+      while (taken.has(n)) n++;
+      passengers.set(id, n);
+    }
+    return n;
+  }
+
+  function receiverLine(r: ReceiverProgress): string {
+    const parts = [
+      `${bytes(r.doneBytes)} of ${bytes(r.totalBytes)}`,
+      r.bytesPerSec > 0 ? `${bytes(r.bytesPerSec)}/s` : "stalled",
+    ];
+    if (r.etaSecs != null) parts.push(duration(r.etaSecs));
+    return parts.join(" · ");
+  }
   const skippedCount = $derived(share.skippedCount ?? 0);
   const reasonText: Record<SkipReason, string> = {
     systemFile: "system file",
@@ -60,17 +89,6 @@
   });
 
   const spokes = [0, 45, 90, 135, 180, 225, 270, 315];
-
-  async function copyLink() {
-    try {
-      // Built now, so it carries the current addresses (not the ones from when Ferry started).
-      const fresh = await api.getShare(share.id);
-      await writeText(fresh.link);
-      toast("Link copied. Paste it into any chat or email.");
-    } catch (err) {
-      toast(`Couldn't copy the link: ${message(err)}`, true);
-    }
-  }
 
   async function saveFile(password?: string) {
     const id = share.id;
@@ -105,19 +123,6 @@
     }
   }
 
-  async function stop() {
-    const ok = await ask(
-      `People with the ticket for “${share.name}” won't be able to download it anymore, and downloads in progress stop. Your files stay where they are.`,
-      { title: "Stop sharing?", kind: "warning", okLabel: "Stop sharing", cancelLabel: "Keep sharing" },
-    );
-    if (!ok) return;
-    try {
-      await api.removeShare(share.id);
-      toast(`Stopped sharing ${share.name}`);
-    } catch (err) {
-      toast(`Couldn't stop sharing: ${message(err)}`, true);
-    }
-  }
 </script>
 
 {#snippet helm(size: number)}
@@ -132,7 +137,7 @@
   </svg>
 {/snippet}
 
-<div class="wrap" class:live>
+<div class="wrap" class:live class:paused>
   <article class="ticket" aria-label="Ticket for {share.name}">
     <div class="main">
       <header class="band">
@@ -140,7 +145,9 @@
         <span class="line">Ferry</span>
         <span class="kind">Ticket</span>
         <span class="state" class:on={live}>
-          {#if live}
+          {#if paused}
+            Off, not sharing
+          {:else if live}
             <span class="pulse" aria-hidden="true"></span>Boarding now
           {:else}
             Valid while shared
@@ -185,15 +192,49 @@
           </div>
         </dl>
 
-        <p class="activity">
-          {#if live && activity}
-            {plural(activity.activePeers, "person", "people")} downloading now, {bytes(activity.uploadedBytes)} sent
-          {:else if activity && activity.uploadedBytes > 0}
-            {bytes(activity.uploadedBytes)} sent since Ferry started
-          {:else}
-            Waiting for someone to open the ticket
+        <div class="manifest">
+          <p class="activity">{statusLine(share, activity)}</p>
+          <!-- Announced when it changes, without the speeds that change every half second. -->
+          <span class="sr-only" aria-live="polite">
+            {paused ? "Sharing is off" : live ? `${plural(receivers.length, "person", "people")} receiving` : ""}
+          </span>
+          {#if receivers.length > 0}
+            <ol class="passengers" aria-label="People receiving">
+              {#each receivers as r (r.id)}
+                {@const pct = percent(r.doneBytes, r.totalBytes)}
+                {@const no = passengerNo(r.id)}
+                <li>
+                  <span class="who">Passenger {no}</span>
+                  <div
+                    class="bar"
+                    role="progressbar"
+                    aria-label="Passenger {no}"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    aria-valuenow={Math.round(pct)}
+                  >
+                    <span style:width="{pct}%"></span>
+                  </div>
+                  <span class="pct">{Math.floor(pct)}%</span>
+                  <span class="nums">{receiverLine(r)}</span>
+                </li>
+              {/each}
+            </ol>
           {/if}
-        </p>
+        </div>
+
+        {#if problem}
+          <div class="problem" role="alert">
+            <p><strong>Couldn't turn sharing back on.</strong> {problem}.</p>
+            <p class="why">Share the same files again to make a new ticket with a new link.</p>
+            <div class="problem-actions">
+              <button class="t-main" onclick={() => shareAgain(share)} disabled={app.importing !== null}>
+                Share again
+              </button>
+              <button class="t-text" onclick={() => delete app.shareProblems[share.id]}>Dismiss</button>
+            </div>
+          </div>
+        {/if}
 
         {#if skippedCount > 0}
           <details class="skipped">
@@ -214,12 +255,15 @@
         {/if}
 
         <div class="actions">
-          <button class="t-main" onclick={copyLink}>Copy link</button>
+          <button class="t-main" onclick={() => copyLink(share)}>Copy link</button>
           <button class="t-line" onclick={() => void saveFile()} disabled={saving}>Save ticket file</button>
           <button class="t-line" onclick={() => passwordDialog?.showModal()} disabled={saving}>
             Save with password
           </button>
-          <button class="t-text" onclick={stop}>Stop sharing</button>
+          <span class="end">
+            <ShareSwitch on={!paused} label="Sharing {share.name}" onchange={(on) => setSharing(share, on)} />
+            <button class="t-text" onclick={() => removeShare(share)}>Remove</button>
+          </span>
         </div>
       </div>
     </div>
@@ -234,6 +278,7 @@
           {#if qr}
             {@html qr}
           {/if}
+          {#if paused}<span class="qr-off">Sharing is off</span>{/if}
         </button>
         <p class="number code" title={share.id}>No. {shortId(share.id)}</p>
         <svg
@@ -494,6 +539,138 @@
   .live .activity {
     color: var(--magenta-deep);
     font-weight: 680;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .manifest {
+    position: relative;
+    margin-bottom: 0.9rem;
+  }
+
+  .manifest .activity {
+    margin-bottom: 0;
+  }
+
+  /* One line per person receiving: who, bar, percent, and the numbers. */
+  .passengers {
+    list-style: none;
+    margin: 0.5rem 0 0;
+    padding: 0.55rem 0.7rem;
+    display: grid;
+    gap: 0.45rem;
+    background: #f5ebf2;
+    border-radius: 8px;
+    max-height: 11rem;
+    overflow-y: auto;
+  }
+
+  .passengers li {
+    display: grid;
+    grid-template-columns: 6.2rem minmax(4rem, 1fr) 2.6rem;
+    grid-template-areas:
+      "who bar pct"
+      "nums nums nums";
+    align-items: center;
+    gap: 0.1rem 0.6rem;
+    font-size: var(--t-xs);
+  }
+
+  .who {
+    grid-area: who;
+    font-weight: 700;
+  }
+
+  .passengers .bar {
+    grid-area: bar;
+    background: #e8d4e1;
+  }
+
+  .passengers .bar > :global(span) {
+    box-shadow: none;
+  }
+
+  .pct {
+    grid-area: pct;
+    text-align: right;
+    font-weight: 700;
+    font-variation-settings: var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .nums {
+    grid-area: nums;
+    color: var(--paper-soft);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .problem {
+    position: relative;
+    display: grid;
+    gap: 0.35rem;
+    margin: -0.3rem 0 0.9rem;
+    padding: 0.6rem 0.8rem;
+    font-size: var(--t-sm);
+    border-radius: 8px;
+    background: #fdecec;
+    box-shadow: inset 3px 0 0 #c0392b;
+    overflow-wrap: anywhere;
+  }
+
+  .problem-actions {
+    display: flex;
+    gap: 0.4rem;
+  }
+
+  .problem-actions button {
+    border-radius: 9px;
+    backdrop-filter: none;
+  }
+
+  /* A ticket that is off: printed in grey, the QR code covered. */
+  .wrap.paused {
+    filter: drop-shadow(0 14px 26px rgb(0 0 0 / 0.55));
+  }
+
+  .paused .band {
+    background:
+      repeating-linear-gradient(115deg, rgb(255 255 255 / 0.05) 0 2px, transparent 2px 7px),
+      linear-gradient(90deg, #5d4a57, #7a6573);
+  }
+
+  .paused h3,
+  .paused .fields {
+    opacity: 0.6;
+  }
+
+  .paused .qr :global(svg) {
+    opacity: 0.18;
+  }
+
+  .qr {
+    position: relative;
+  }
+
+  .qr-off {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 0.4rem;
+    font-size: var(--t-xs);
+    font-weight: 700;
+    color: var(--paper-ink);
+    text-align: center;
+  }
+
+  .paused .number {
+    color: #cfc3ca;
+  }
+
+  .end {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
   }
 
   .skipped {

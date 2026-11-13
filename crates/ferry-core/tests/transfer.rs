@@ -253,6 +253,160 @@ async fn removing_a_share_ends_a_running_transfer() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_share_turned_off_is_refused_until_turned_on_again() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("notes.txt");
+    let data = content(300_000, 5);
+    std::fs::write(&file, &data).unwrap();
+    let sender_dir = tmp.path().join("sender");
+    let sender = node(&sender_dir).await;
+    let receiver = node(&tmp.path().join("receiver")).await;
+    let share = sender.create_share(vec![file.clone()]).await.unwrap();
+    let link = ShareLink::parse(&share.link).unwrap();
+
+    let off = sender.set_share_paused(&share.id, true).await.unwrap();
+    assert!(off.paused);
+    assert_eq!(sender.list_shares().len(), 1, "a share turned off is kept");
+    assert!(receiver.preview(&link).await.is_err());
+
+    // It stays off after a restart.
+    sender.shutdown().await.unwrap();
+    drop(sender);
+    let sender = node(&sender_dir).await;
+    assert!(sender.list_shares()[0].paused);
+    // The restarted node listens on new addresses; take the link it gives now.
+    let link = ShareLink::parse(&sender.list_shares()[0].link).unwrap();
+    let err = receiver.preview(&link).await.unwrap_err().to_string();
+    assert!(
+        !err.contains("could not reach"),
+        "the sender must answer and refuse: {err}"
+    );
+
+    // A file that changed size blocks turning it on.
+    std::fs::write(&file, b"changed").unwrap();
+    let err = sender
+        .set_share_paused(&share.id, false)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("notes.txt was moved"), "{err}");
+    assert!(sender.list_shares()[0].paused);
+
+    std::fs::write(&file, &data).unwrap();
+    let on = sender.set_share_paused(&share.id, false).await.unwrap();
+    assert!(!on.paused);
+    let started = receiver
+        .start_download(&link, tmp.path().join("dl"))
+        .await
+        .unwrap();
+    let done = wait_for_end(&receiver, &started.id).await;
+    assert_eq!(done.status, DownloadStatus::Completed, "{:?}", done.error);
+    assert_eq!(std::fs::read(done.saved_path.unwrap()).unwrap(), data);
+
+    sender.shutdown().await.unwrap();
+    receiver.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn turning_off_reports_a_failed_save_but_stays_off() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("notes.txt");
+    std::fs::write(&file, content(50_000, 7)).unwrap();
+    let sender_dir = tmp.path().join("sender");
+    let sender = node(&sender_dir).await;
+    let receiver = node(&tmp.path().join("receiver")).await;
+    let share = sender.create_share(vec![file]).await.unwrap();
+    let link = ShareLink::parse(&share.link).unwrap();
+
+    // A folder where the registry goes makes saving it fail.
+    let registry = sender_dir.join("registry.json");
+    std::fs::remove_file(&registry).unwrap();
+    std::fs::create_dir(&registry).unwrap();
+    let mut events = sender.subscribe();
+    let err = sender.set_share_paused(&share.id, true).await.unwrap_err();
+    assert!(format!("{err:#}").contains("sharing is off now"), "{err:#}");
+    assert!(sender.share(&share.id).unwrap().paused, "it is off anyway");
+    let mut announced = false;
+    while let Ok(event) = events.try_recv() {
+        if let Event::ShareUpdated { share: updated } = event {
+            announced |= updated.id == share.id && updated.paused;
+        }
+    }
+    assert!(announced, "the change is still announced");
+    assert!(receiver.preview(&link).await.is_err());
+
+    // Once saving works again, the off state is saved and survives a restart.
+    std::fs::remove_dir(&registry).unwrap();
+    sender.set_share_paused(&share.id, true).await.unwrap();
+    sender.shutdown().await.unwrap();
+    drop(sender);
+    let sender = node(&sender_dir).await;
+    assert!(sender.list_shares()[0].paused);
+
+    sender.shutdown().await.unwrap();
+    receiver.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_and_sharing_the_same_files_at_once_stay_consistent() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("a.bin");
+    std::fs::write(&file, content(200_000, 9)).unwrap();
+    let sender = node(&tmp.path().join("sender")).await;
+    let id = sender.create_share(vec![file.clone()]).await.unwrap().id;
+    for round in 0..20 {
+        let mut events = sender.subscribe();
+        // Remove the share just as the same files, shared again, are being committed (the
+        // last import progress is sent once their tag is written).
+        let mut progress = sender.subscribe();
+        let remover = {
+            let (sender, id) = (sender.clone(), id.clone());
+            tokio::spawn(async move {
+                loop {
+                    if let Ok(Event::ImportProgress {
+                        done_bytes,
+                        total_bytes,
+                        current_file,
+                        ..
+                    }) = progress.recv().await
+                        && done_bytes == total_bytes
+                        && current_file.is_empty()
+                    {
+                        break;
+                    }
+                }
+                sender.remove_share(&id).await
+            })
+        };
+        // Sharing the same files gives the same (content-addressed) id.
+        let created = sender.create_share(vec![file.clone()]).await.unwrap();
+        assert_eq!(created.id, id);
+        remover.await.unwrap().unwrap();
+        let listed = sender.share(&id).is_some();
+        // The last event about the share agrees with whether it is still there.
+        let mut last = None;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                Event::ShareCreated { share } if share.id == id => last = Some(true),
+                Event::ShareRemoved { share_id } if share_id == id => last = Some(false),
+                _ => {}
+            }
+        }
+        assert_eq!(last, Some(listed), "round {round}");
+        if listed {
+            // The removal did not take the file list of the share created again.
+            sender.share_files(&id).unwrap();
+        } else {
+            sender.create_share(vec![file.clone()]).await.unwrap();
+        }
+    }
+    sender.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn shares_and_identity_survive_restart() {
     init_tracing();
     let tmp = tempfile::tempdir().unwrap();
@@ -315,6 +469,73 @@ async fn ids_are_normalized_and_unknown_ids_rejected() {
     sender.shutdown().await.unwrap();
 }
 
+/// Two people downloading at once use the same request numbers on their own connections;
+/// the sender must still show them as two receivers, each with its own progress.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_receivers_at_once_are_told_apart() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("movie.bin");
+    let size = 128 * 1024 * 1024;
+    std::fs::write(&file, content(size, 6)).unwrap();
+    let sender = node(&tmp.path().join("sender")).await;
+    let first = node(&tmp.path().join("first")).await;
+    let second = node(&tmp.path().join("second")).await;
+    let share = sender.create_share(vec![file]).await.unwrap();
+    let link = ShareLink::parse(&share.link).unwrap();
+    let mut events = sender.subscribe();
+
+    let started = std::time::Instant::now();
+    let (a, b) = tokio::join!(
+        first.start_download(&link, tmp.path().join("dl1")),
+        second.start_download(&link, tmp.path().join("dl2")),
+    );
+    let (a, b) = (a.unwrap(), b.unwrap());
+
+    let mut most_at_once = 0;
+    let mut last_done = std::collections::HashMap::new();
+    let watch = async {
+        loop {
+            let Ok(Event::ShareActivity { receivers, .. }) = events.recv().await else {
+                continue;
+            };
+            most_at_once = most_at_once.max(receivers.len());
+            for r in &receivers {
+                assert_eq!(r.total_bytes, size as u64, "{receivers:?}");
+                assert!(r.done_bytes <= r.total_bytes);
+                let before = last_done.insert(r.id, r.done_bytes).unwrap_or(0);
+                assert!(r.done_bytes >= before, "progress went back: {receivers:?}");
+            }
+        }
+    };
+    let ended = |node: Node, id: String| async move {
+        let done = wait_for_end(&node, &id).await;
+        (done, started.elapsed())
+    };
+    let overlap = tokio::select! {
+        _ = watch => unreachable!(),
+        ((x, x_took), (y, y_took)) = async {
+            tokio::join!(ended(first.clone(), a.id.clone()), ended(second.clone(), b.id.clone()))
+        } => {
+            assert_eq!(x.status, DownloadStatus::Completed, "{:?}", x.error);
+            assert_eq!(y.status, DownloadStatus::Completed, "{:?}", y.error);
+            x_took.min(y_took)
+        }
+    };
+    // Both started together, so they ran side by side until the first one ended. Snapshots
+    // come every 500 ms; after three of them both must have been shown at once. (Optimized
+    // builds can be too quick for that, then only the per-receiver checks above apply.)
+    if overlap >= Duration::from_millis(1500) {
+        assert_eq!(most_at_once, 2, "both downloads must show at the same time");
+    } else {
+        eprintln!("transfers overlapped only {overlap:?}; not checking that both showed at once");
+    }
+
+    for node in [sender, first, second] {
+        node.shutdown().await.unwrap();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn upload_activity_is_reported() {
     init_tracing();
@@ -339,18 +560,24 @@ async fn upload_activity_is_reported() {
         DownloadStatus::Completed
     );
 
-    // Wait for the snapshot taken after every request finished.
+    // Wait for the snapshot taken after every request finished. Previews and index fetches
+    // carry no file data, so the only receiver ever shown is the download, asking for the
+    // whole file.
     let mut last = 0;
+    let mut receivers_seen = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if let Ok(Event::ShareActivity {
                 share_id,
                 uploaded_bytes,
                 active_peers,
+                receivers,
+                ..
             }) = events.recv().await
                 && share_id == share.id
             {
                 last = uploaded_bytes;
+                receivers_seen.extend(receivers.into_iter().map(|r| r.total_bytes));
                 if active_peers == 0 && uploaded_bytes >= 2_000_000 {
                     break;
                 }
@@ -361,6 +588,10 @@ async fn upload_activity_is_reported() {
     assert!(
         (2_000_000..2_100_000).contains(&last),
         "expected about 2 MB sent, got {last}"
+    );
+    assert!(
+        receivers_seen.iter().all(|&total| total == 2_000_000),
+        "unexpected receivers: {receivers_seen:?}"
     );
 
     sender.shutdown().await.unwrap();

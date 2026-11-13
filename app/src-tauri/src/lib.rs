@@ -139,6 +139,16 @@ async fn create_share(state: State<'_, AppState>, paths: Vec<PathBuf>) -> CmdRes
 }
 
 #[tauri::command]
+async fn set_share_paused(
+    state: State<'_, AppState>,
+    id: String,
+    paused: bool,
+) -> CmdResult<ShareInfo> {
+    let node = state.node.clone();
+    node.set_share_paused(&id, paused).await.map_err(fail)
+}
+
+#[tauri::command]
 async fn remove_share(state: State<'_, AppState>, id: String) -> CmdResult<()> {
     let node = state.node.clone();
     node.remove_share(&id).await.map_err(fail)
@@ -574,6 +584,7 @@ pub fn run() {
             get_share,
             create_share,
             remove_share,
+            set_share_paused,
             save_share_file,
             share_qr,
             read_share_file,

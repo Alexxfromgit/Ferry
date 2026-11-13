@@ -36,12 +36,19 @@ pub struct ShareInfo {
     pub skipped: Vec<SkippedItem>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub skipped_count: usize,
+    /// Turned off by the user: not served, but kept so it can be turned on again.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub paused: bool,
 }
 
 pub const MAX_SKIPPED_LISTED: usize = 100;
 
 fn is_zero(n: &usize) -> bool {
     *n == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Why something in a shared selection was left out.
@@ -206,7 +213,33 @@ fn take_legacy_files(value: &mut serde_json::Value) -> LegacyFileLists {
         .collect()
 }
 
+/// One entry of a share's file list on disk: a [`FileEntry`] plus where it was read from.
+/// Readers that only need names and sizes read the same file as [`FileEntry`]s; the extra
+/// field is ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListedFile {
+    pub name: String,
+    pub size: u64,
+    /// Index into the share's `source_paths` of the item this file was read from. Recorded
+    /// when a share has several items, since two of them can have the same name (folders with
+    /// the same name are merged). `None` in lists written before it was recorded, and for
+    /// shares of a single item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<usize>,
+}
+
+impl From<FileEntry> for ListedFile {
+    fn from(file: FileEntry) -> Self {
+        Self {
+            name: file.name,
+            size: file.size,
+            source: None,
+        }
+    }
+}
+
 /// Each share's full file list, one JSON file per share, written once when the share is made.
+#[derive(Clone)]
 pub struct FileLists {
     dir: PathBuf,
 }
@@ -220,12 +253,22 @@ impl FileLists {
         self.dir.join(format!("{id}.json"))
     }
 
-    pub fn write(&self, id: &str, files: &[FileEntry]) -> anyhow::Result<()> {
+    pub fn write(&self, id: &str, files: &[ListedFile]) -> anyhow::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         util::write_atomic(&self.path(id), &serde_json::to_vec(files)?)
     }
 
+    /// Names and sizes only.
     pub fn read(&self, id: &str) -> anyhow::Result<Vec<FileEntry>> {
+        self.read_as(id)
+    }
+
+    /// Names and sizes, and where each file was read from.
+    pub fn read_listed(&self, id: &str) -> anyhow::Result<Vec<ListedFile>> {
+        self.read_as(id)
+    }
+
+    fn read_as<T: serde::de::DeserializeOwned>(&self, id: &str) -> anyhow::Result<Vec<T>> {
         let bytes = std::fs::read(self.path(id))
             .map_err(|e| anyhow::anyhow!("the file list of this share is missing ({e})"))?;
         Ok(serde_json::from_slice(&bytes)?)
@@ -268,6 +311,29 @@ mod tests {
         let json = String::from_utf8(registry.to_json().unwrap()).unwrap();
         assert!(!json.contains("A/x"));
     }
+
+    #[test]
+    fn file_lists_keep_sources_and_read_without_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let lists = FileLists::new(dir.path().join("shares"));
+        let listed = vec![
+            ListedFile {
+                name: "Photos/x.jpg".into(),
+                size: 2,
+                source: Some(1),
+            },
+            ListedFile {
+                name: "b.txt".into(),
+                size: 3,
+                source: None,
+            },
+        ];
+        lists.write("abc", &listed).unwrap();
+        assert_eq!(lists.read_listed("abc").unwrap(), listed);
+        let plain = lists.read("abc").unwrap();
+        assert_eq!(plain[0].name, "Photos/x.jpg");
+        assert_eq!(plain[1].size, 3);
+    }
 }
 
 #[cfg(test)]
@@ -301,13 +367,15 @@ mod size_probe {
                 ticket: String::new(),
                 skipped: Vec::new(),
                 skipped_count: 0,
+                paused: false,
             }],
             downloads: Vec::new(),
         };
         let dir = tempfile::tempdir().unwrap();
         let lists = FileLists::new(dir.path().join("shares"));
+        let listed: Vec<ListedFile> = files.into_iter().map(ListedFile::from).collect();
         let t = std::time::Instant::now();
-        lists.write(&registry.shares[0].id, &files).unwrap();
+        lists.write(&registry.shares[0].id, &listed).unwrap();
         let list_write = t.elapsed();
         let path = dir.path().join("registry.json");
         let t = std::time::Instant::now();
