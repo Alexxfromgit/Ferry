@@ -2,8 +2,8 @@
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, message } from "./api";
-  import { bytes, plural } from "./format";
-  import { app, checkLink, clearPreview, openTicket, receive, startDownload } from "./store.svelte";
+  import { bytes, exactCount, plural } from "./format";
+  import { activeDownloadCount, app, checkLink, clearPreview, openTicket, receive, startDownload } from "./store.svelte";
   import DownloadRow from "./DownloadRow.svelte";
 
   let settingsDir = $state("");
@@ -131,7 +131,10 @@
 </section>
 
 <section aria-label="Downloads">
-  <h2>Downloads</h2>
+  <h2>
+    Downloads
+    {#if activeDownloadCount() > 0}<span class="h-count">{exactCount(activeDownloadCount())} in progress</span>{/if}
+  </h2>
   {#if app.downloads.length === 0}
     <p class="muted">Files you receive appear here, with their progress.</p>
   {:else}

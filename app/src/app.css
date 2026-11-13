@@ -84,6 +84,30 @@ h2 {
   letter-spacing: -0.01em;
 }
 
+/* A muted exact count beside a section heading, e.g. "Shared now 1,234". */
+.h-count {
+  margin-left: 0.5rem;
+  font-size: var(--t-sm);
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--ink-soft);
+  font-variation-settings: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Read by screen readers, not shown. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .muted {
   color: var(--ink-soft);
 }
