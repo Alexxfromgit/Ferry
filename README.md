@@ -23,7 +23,7 @@ If there are no installers yet, you can [build Ferry from source](#build-from-so
 | Platform | Installer |
 | --- | --- |
 | Windows x64 | `.exe` or `.msi` |
-| macOS | `.dmg` for Apple silicon (arm64) or Intel (x64) |
+| macOS | `.dmg` or `.pkg` for Apple silicon (arm64) or Intel (x64) |
 | Linux x64 | `.deb` or `.AppImage` built on Ubuntu 22.04 |
 
 Ferry is an early desktop release. Windows has received manual testing. macOS and Linux

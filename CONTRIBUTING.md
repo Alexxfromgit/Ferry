@@ -47,7 +47,8 @@ When changing the app or ticket icon, update its source under `app/src-tauri/ico
 ## macOS smoke test
 
 1. From a clean clone, run `./build.sh --check` and `./build.sh --bundle`. Open the DMG in
-   `target/release/bundle/dmg/` and copy Ferry to Applications.
+   `target/release/bundle/dmg/` and copy Ferry to Applications, or open the installer package in
+   `target/release/bundle/pkg/`, which installs Ferry into Applications.
 2. Launch Ferry. Confirm the menu bar item works, closing the window leaves the app running,
    and **Quit Ferry** exits.
 3. With Ferry closed and then again with it running, open a sample `.ferry` file or a
