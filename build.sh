@@ -10,7 +10,8 @@ for arg in "$@"; do
         --bundle) bundle=true ;;
         -h|--help)
             echo "Usage: ./build.sh [--check] [--bundle]"
-            echo "Builds the desktop app and CLI. --check runs checks and tests; --bundle also builds installers."
+            echo "Builds the desktop app and CLI. --check runs checks and tests; --bundle also builds installers"
+            echo "(.dmg and .pkg on macOS, .deb and .AppImage on Linux)."
             exit 0
             ;;
         *) echo "Unknown argument: $arg" >&2; exit 2 ;;
@@ -34,11 +35,14 @@ fi
 bundle_args=(--no-bundle)
 if "$bundle"; then
     case "$(uname -s)" in
-        Darwin) bundle_args=(--bundles dmg) ;;
+        Darwin) bundle_args=(--bundles app,dmg) ;; # The .pkg is built from the kept .app.
         Linux) bundle_args=(--bundles deb,appimage) ;;
         *) echo "Use build.ps1 to build Windows installers." >&2; exit 2 ;;
     esac
 fi
 
 npm --prefix app run tauri -- build "${bundle_args[@]}" -- --locked
+if "$bundle" && [[ "$(uname -s)" == Darwin ]]; then
+    ./scripts/macos-pkg.sh target/release/bundle/macos/Ferry.app target/release/bundle/pkg
+fi
 cargo build --locked --release -p ferry-cli

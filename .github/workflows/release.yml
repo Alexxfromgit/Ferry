@@ -79,8 +79,8 @@ jobs:
       matrix:
         include:
           - { platform: windows-x64, os: windows-latest, extensions: 'msi,exe' }
-          - { platform: macos-arm64, os: macos-15, extensions: dmg }
-          - { platform: macos-x64, os: macos-15-intel, extensions: dmg }
+          - { platform: macos-arm64, os: macos-15, extensions: 'dmg,pkg' }
+          - { platform: macos-x64, os: macos-15-intel, extensions: 'dmg,pkg' }
           - { platform: linux-x64, os: ubuntu-22.04, extensions: 'deb,AppImage' }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -175,6 +175,7 @@ jobs:
           base="Ferry-${TAG#v}"
           files=("$base-windows-x64.msi" "$base-windows-x64.exe"
             "$base-macos-arm64.dmg" "$base-macos-x64.dmg"
+            "$base-macos-arm64.pkg" "$base-macos-x64.pkg"
             "$base-linux-x64.deb" "$base-linux-x64.AppImage")
           for file in "${files[@]}"; do
             test -s "$file"

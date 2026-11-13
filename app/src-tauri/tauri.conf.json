@@ -55,6 +55,7 @@
       "../node_modules/@fontsource-variable/recursive/LICENSE": "LICENSE-Recursive.txt"
     },
     "macOS": {
+      "signingIdentity": "-",
       "files": {
         "Resources/ferry-file.icns": "icons/ferry-file.icns"
       }
