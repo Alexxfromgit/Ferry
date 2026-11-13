@@ -1197,6 +1197,8 @@ impl SpeedMeter {
 mod tests {
     use super::*;
 
+    mod resume;
+
     #[test]
     fn display_name_counts_distinct_top_levels() {
         assert_eq!(display_name(["b/x", "a", "b/y"].into_iter()), "2 items");

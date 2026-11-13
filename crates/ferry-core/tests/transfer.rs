@@ -20,12 +20,6 @@ async fn node(dir: &Path) -> Node {
     Node::start(Config::local_only(dir)).await.unwrap()
 }
 
-async fn node_without_resume(dir: &Path) -> Node {
-    let mut config = Config::local_only(dir);
-    config.resume_downloads = false;
-    Node::start(config).await.unwrap()
-}
-
 /// Deterministic pseudo-random content so the transfer spans many chunks.
 fn content(len: usize, seed: u8) -> Vec<u8> {
     (0..len)
@@ -368,62 +362,6 @@ async fn upload_activity_is_reported() {
         (2_000_000..2_100_000).contains(&last),
         "expected about 2 MB sent, got {last}"
     );
-
-    sender.shutdown().await.unwrap();
-    receiver.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn interrupted_download_resumes_after_restart() {
-    init_tracing();
-    let tmp = tempfile::tempdir().unwrap();
-    let file = tmp.path().join("large.bin");
-    let data = content(96 * 1024 * 1024, 5);
-    std::fs::write(&file, &data).unwrap();
-    let sender = node(&tmp.path().join("sender")).await;
-    let share = sender.create_share(vec![file]).await.unwrap();
-    let link = ShareLink::parse(&share.link).unwrap();
-
-    let receiver_dir = tmp.path().join("receiver");
-    let receiver = node(&receiver_dir).await;
-    let mut events = receiver.subscribe();
-    let started = receiver
-        .start_download(&link, tmp.path().join("dl"))
-        .await
-        .unwrap();
-    // Stop the receiver as soon as some data has arrived (the first progress is reported
-    // immediately, so this does not depend on machine speed).
-    let partial = wait_for_partial(&mut events, &started.id).await;
-    receiver.shutdown().await.unwrap();
-    drop(events);
-    drop(receiver);
-    assert!(
-        partial < data.len() as u64,
-        "transfer finished before it could be interrupted"
-    );
-
-    // Restart without automatic resume, so we can watch the resume from the start.
-    let receiver = node_without_resume(&receiver_dir).await;
-    let mut events = receiver.subscribe();
-    receiver.resume_download(&started.id).await.unwrap();
-    let resumed_from = tokio::time::timeout(Duration::from_secs(60), async {
-        loop {
-            if let Ok(Event::DownloadUpdated { download }) = events.recv().await
-                && download.status == DownloadStatus::Downloading
-            {
-                return download.done_bytes;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    assert!(
-        resumed_from > 0,
-        "data received before the restart must be reused"
-    );
-    let done = wait_for_end(&receiver, &started.id).await;
-    assert_eq!(done.status, DownloadStatus::Completed, "{:?}", done.error);
-    assert_eq!(std::fs::read(done.saved_path.unwrap()).unwrap(), data);
 
     sender.shutdown().await.unwrap();
     receiver.shutdown().await.unwrap();
