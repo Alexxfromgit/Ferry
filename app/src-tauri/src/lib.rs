@@ -5,6 +5,9 @@
 //! manager, or a second app launch) are queued and announced with `ferry-open-link`. When the
 //! UI may have missed events, `ferry-resync` tells it to reload its lists.
 
+#[cfg(desktop)]
+mod updates;
+
 use std::{
     path::{Path, PathBuf},
     sync::Mutex,
@@ -37,9 +40,15 @@ struct Settings {
     download_dir: PathBuf,
     relay: RelayChoice,
     close_to_tray: bool,
+    #[serde(default = "default_auto_check_updates")]
+    auto_check_updates: bool,
     /// Show the mascot artwork behind the UI. Missing from settings saved before it existed.
     #[serde(default = "yes")]
     show_artwork: bool,
+}
+
+fn default_auto_check_updates() -> bool {
+    true
 }
 
 fn yes() -> bool {
@@ -81,6 +90,7 @@ fn load_settings(path: &Path, default_download_dir: PathBuf) -> Settings {
         download_dir: default_download_dir,
         relay: RelayChoice::Default,
         close_to_tray: true,
+        auto_check_updates: default_auto_check_updates(),
         show_artwork: true,
     };
     let Some(mut settings) = std::fs::read(path)
@@ -257,14 +267,20 @@ fn get_settings(state: State<'_, AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
 }
 
+fn save_settings(path: &Path, settings: &Settings) -> CmdResult<()> {
+    let json = serde_json::to_vec_pretty(settings).map_err(fail)?;
+    ferry_core::write_atomic(path, &json).map_err(fail)
+}
+
 /// Save settings. Returns `true` when a restart is needed for them to take effect.
 #[tauri::command]
-fn set_settings(state: State<'_, AppState>, settings: Settings) -> CmdResult<bool> {
+fn set_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult<bool> {
     validate_settings(&settings)?;
-    let json = serde_json::to_vec_pretty(&settings).map_err(fail)?;
-    ferry_core::write_atomic(&state.settings_path, &json).map_err(fail)?;
+    let mut saved = state.settings.lock().unwrap();
+    settings.auto_check_updates = saved.auto_check_updates;
+    save_settings(&state.settings_path, &settings)?;
     let restart = settings.relay != *state.node.relay();
-    *state.settings.lock().unwrap() = settings;
+    *saved = settings;
     Ok(restart)
 }
 
@@ -530,6 +546,9 @@ pub fn run() {
             accept_links(app, argv.into_iter().skip(1).filter(|a| !is_ferry_url(a)));
             show_main(app);
         }));
+        builder = builder
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .manage(updates::PendingUpdate::default());
     }
     let app = builder
         .plugin(tauri_plugin_deep_link::init())
@@ -567,6 +586,14 @@ pub fn run() {
             reveal_download,
             get_settings,
             set_settings,
+            #[cfg(desktop)]
+            updates::update_info,
+            #[cfg(desktop)]
+            updates::set_auto_check_updates,
+            #[cfg(desktop)]
+            updates::check_for_updates,
+            #[cfg(desktop)]
+            updates::install_update,
             take_pending_links,
             open_project_page,
             open_third_party_notices,
@@ -630,6 +657,7 @@ mod tests {
             download_dir: std::env::temp_dir(),
             relay: RelayChoice::Custom("https://relay.example.com".into()),
             close_to_tray: true,
+            auto_check_updates: true,
             show_artwork: true,
         };
         assert!(validate_settings(&ok).is_ok());
@@ -643,6 +671,19 @@ mod tests {
             ..ok
         };
         assert!(validate_settings(&relative).is_err());
+    }
+
+    #[test]
+    fn existing_settings_default_to_automatic_update_checks() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "downloadDir": std::env::temp_dir(),
+            "relay": { "mode": "disabled" },
+            "closeToTray": false,
+        }))
+        .unwrap();
+        assert!(settings.auto_check_updates);
+        assert!(!settings.close_to_tray);
+        assert_eq!(settings.relay, RelayChoice::Disabled);
     }
 
     #[test]
@@ -660,6 +701,7 @@ mod tests {
         assert_eq!(settings.download_dir, saved);
         assert!(!settings.close_to_tray);
         assert!(settings.show_artwork);
+        assert!(settings.auto_check_updates);
     }
 
     fn tempfile_dir() -> PathBuf {

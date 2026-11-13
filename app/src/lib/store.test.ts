@@ -112,6 +112,28 @@ describe("events", () => {
   });
 });
 
+describe("updates", () => {
+  it("honors the automatic check preference and lets users check manually", async () => {
+    await freshStore();
+    backend.update_info = () => ({
+      version: "0.1.0",
+      support: "available",
+      autoCheck: false,
+      readyVersion: null,
+    });
+    backend.check_for_updates = () => "0.2.0";
+    const { initUpdates, checkForUpdates, updates } = await import("./updates.svelte");
+    const stop = initUpdates();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(invoke).not.toHaveBeenCalledWith("check_for_updates", expect.anything());
+
+    await checkForUpdates();
+    expect(invoke).toHaveBeenCalledWith("check_for_updates", { automatic: false });
+    expect(updates.info?.readyVersion).toBe("0.2.0");
+    stop();
+  });
+});
+
 describe("checking links", () => {
   it("keeps only the newest preview when checks overlap", async () => {
     const { receive, checkLink } = await freshStore();

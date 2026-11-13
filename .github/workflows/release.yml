@@ -78,10 +78,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: windows-x64, os: windows-latest, extensions: 'msi,exe' }
-          - { platform: macos-arm64, os: macos-15, extensions: 'dmg,pkg' }
-          - { platform: macos-x64, os: macos-15-intel, extensions: 'dmg,pkg' }
-          - { platform: linux-x64, os: ubuntu-22.04, extensions: 'deb,AppImage' }
+          - { platform: windows-x64, os: windows-latest, extensions: 'msi,exe', updater_extensions: 'msi,exe' }
+          - { platform: macos-arm64, os: macos-15, extensions: 'dmg,pkg,app.tar.gz', updater_extensions: app.tar.gz }
+          - { platform: macos-x64, os: macos-15-intel, extensions: 'dmg,pkg,app.tar.gz', updater_extensions: app.tar.gz }
+          - { platform: linux-x64, os: ubuntu-22.04, extensions: 'deb,AppImage', updater_extensions: AppImage }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions:
@@ -90,6 +90,7 @@ jobs:
       CARGO_TERM_COLOR: always
       TAG: ${{ needs.prepare.outputs.tag }}
       EXTENSIONS: ${{ matrix.extensions }}
+      UPDATER_EXTENSIONS: ${{ matrix.updater_extensions }}
       PLATFORM: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
@@ -125,12 +126,21 @@ jobs:
             build-essential libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev \
             librsvg2-dev libdbus-1-dev pkg-config patchelf libxdo-dev libfuse2 file xdg-utils
       - name: Build installers
-        if: runner.os != 'Windows'
-        run: ./build.sh --bundle
-      - name: Build installers
-        if: runner.os == 'Windows'
         shell: pwsh
-        run: ./build.ps1 -Bundle
+        env:
+          FERRY_UPDATER_PUBLIC_KEY: ${{ vars.FERRY_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          if (!$env:FERRY_UPDATER_PUBLIC_KEY -or !$env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw 'Configure FERRY_UPDATER_PUBLIC_KEY and TAURI_SIGNING_PRIVATE_KEY before publishing. See docs/RELEASING.md.'
+          }
+          if ($IsWindows) {
+            ./build.ps1 -Bundle
+          } else {
+            bash ./build.sh --bundle
+          }
       - name: Stage installers
         shell: pwsh
         run: |
@@ -141,7 +151,12 @@ jobs:
             if ($files.Count -ne 1) {
               throw "Expected one .$ext installer for $env:PLATFORM, found $($files.Count)."
             }
-            Copy-Item -LiteralPath $files[0].FullName -Destination "release-assets/Ferry-$version-$env:PLATFORM.$ext"
+            $source = $files[0].FullName
+            $destination = "release-assets/Ferry-$version-$env:PLATFORM.$ext"
+            Copy-Item -LiteralPath $source -Destination $destination
+            if ($ext -cin $env:UPDATER_EXTENSIONS.Split(',')) {
+              Copy-Item -LiteralPath "$source.sig" -Destination "$destination.sig"
+            }
           }
       - uses: actions/upload-artifact@v7
         with:
@@ -163,24 +178,22 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.prepare.outputs.tag }}
+      FERRY_UPDATER_PUBLIC_KEY: ${{ vars.FERRY_UPDATER_PUBLIC_KEY }}
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: assets
           merge-multiple: true
       - name: Validate assets and write checksums
-        working-directory: assets
-        run: |
-          base="Ferry-${TAG#v}"
-          files=("$base-windows-x64.msi" "$base-windows-x64.exe"
-            "$base-macos-arm64.dmg" "$base-macos-x64.dmg"
-            "$base-macos-arm64.pkg" "$base-macos-x64.pkg"
-            "$base-linux-x64.deb" "$base-linux-x64.AppImage")
-          for file in "${files[@]}"; do
-            test -s "$file"
-          done
-          sha256sum -- "${files[@]}" > SHA256SUMS.txt
+        run: python3 scripts/prepare-release-assets.py assets "$TAG" "$GITHUB_REPOSITORY"
       - uses: actions/attest@v4
         with:
           subject-path: assets/*

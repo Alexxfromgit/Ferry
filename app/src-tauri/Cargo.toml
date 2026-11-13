@@ -31,3 +31,4 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = { version = "2.5", features = ["deep-link"] }
+tauri-plugin-updater = { version = "2.14.1", default-features = false, features = ["rustls-tls", "system-proxy"] }

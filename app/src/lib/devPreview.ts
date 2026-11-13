@@ -3,6 +3,7 @@
 
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
+import { version } from "../../package.json";
 import type { DownloadInfo, ShareInfo } from "./types";
 
 const now = Math.floor(Date.now() / 1000);
@@ -105,8 +106,6 @@ export function installDevPreview() {
           return empty ? [] : shares;
         case "list_downloads":
           return empty ? [] : downloads;
-        case "plugin:app|version":
-          return "0.1.0";
         case "open_project_page":
         case "open_third_party_notices":
           return null;
@@ -117,6 +116,8 @@ export function installDevPreview() {
         case "set_settings":
           Object.assign(settings, (args as { settings: typeof settings }).settings);
           return false;
+        case "update_info":
+          return { version, support: "unavailable", autoCheck: true, readyVersion: null };
         case "take_pending_links":
           return [];
         case "preview":
