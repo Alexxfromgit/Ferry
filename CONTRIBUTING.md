@@ -12,7 +12,7 @@ install the same native packages used by CI.
 ```sh
 sudo apt-get update
 sudo apt-get install -y build-essential libssl-dev libwebkit2gtk-4.1-dev \
-  libayatana-appindicator3-dev librsvg2-dev patchelf libxdo-dev libfuse2 file xdg-utils
+  libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev pkg-config patchelf libxdo-dev libfuse2 file xdg-utils
 ```
 
 Run these commands from the repository root. On Windows, use `npm.cmd` if PowerShell's
