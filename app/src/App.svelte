@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { app, init, toast, type View } from "./lib/store.svelte";
+  import { activeDownloadCount, app, init, toast, type View } from "./lib/store.svelte";
+  import { compactCount, exactCount } from "./lib/format";
   import { message } from "./lib/api";
   import SendView from "./lib/SendView.svelte";
   import ReceiveView from "./lib/ReceiveView.svelte";
@@ -16,9 +17,16 @@
     { id: "settings", label: "Settings" },
   ];
 
-  const activeDownloads = $derived(
-    app.downloads.filter((d) => ["connecting", "downloading", "exporting"].includes(d.status)).length,
-  );
+  /** What each tab's badge counts, with the words for its tooltip and screen readers. */
+  const badges = $derived<Record<View, { n: number; one: string; many: string }>>({
+    send: { n: app.shares.length, one: "share", many: "shares" },
+    receive: { n: activeDownloadCount(), one: "download in progress", many: "downloads in progress" },
+    settings: { n: 0, one: "", many: "" },
+  });
+
+  function badgeText(b: { n: number; one: string; many: string }): string {
+    return `${exactCount(b.n)} ${b.n === 1 ? b.one : b.many}`;
+  }
 
   const reach = $derived.by(() => {
     if (!app.status) return { level: "off", text: "Starting…" };
@@ -68,13 +76,13 @@
             class="tab"
             class:active={app.view === tab.id}
             aria-current={app.view === tab.id ? "page" : undefined}
+            title={badges[tab.id].n > 0 ? badgeText(badges[tab.id]) : undefined}
             onclick={() => (app.view = tab.id)}
           >
             {tab.label}
-            {#if tab.id === "send" && app.shares.length > 0}
-              <span class="count">{app.shares.length}</span>
-            {:else if tab.id === "receive" && activeDownloads > 0}
-              <span class="count">{activeDownloads}</span>
+            {#if badges[tab.id].n > 0}
+              <span class="count" aria-hidden="true">{compactCount(badges[tab.id].n)}</span>
+              <span class="sr-only">, {badgeText(badges[tab.id])}</span>
             {/if}
           </button>
         </li>
@@ -159,6 +167,7 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 0.6rem;
     text-align: left;
     border: 1px solid transparent;
     background: transparent;
@@ -182,7 +191,10 @@
   }
 
   .count {
+    flex: none;
     min-width: 1.4rem;
+    line-height: 1.5;
+    font-variant-numeric: tabular-nums;
     text-align: center;
     font-size: var(--t-xs);
     font-variation-settings: var(--mono);

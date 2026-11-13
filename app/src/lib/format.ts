@@ -18,6 +18,18 @@ export function duration(secs: number): string {
   return `about ${hours} h ${minutes % 60} min left`;
 }
 
+const compact = new Intl.NumberFormat("en", { notation: "compact" });
+
+/** A count short enough for a badge: exact up to 999, then 1K, 1.2K, 12K, 1.2M. */
+export function compactCount(n: number): string {
+  return n < 1000 ? String(n) : compact.format(n);
+}
+
+/** A count with thousands separators, e.g. "12,345". */
+export function exactCount(n: number): string {
+  return n.toLocaleString("en");
+}
+
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }

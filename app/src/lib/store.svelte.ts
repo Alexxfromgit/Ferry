@@ -39,6 +39,13 @@ export const receive = $state({
   starting: false,
 });
 
+const ACTIVE_DOWNLOAD = ["connecting", "downloading", "exporting"];
+
+/** Downloads still under way: what the Receive tab's badge counts. */
+export function activeDownloadCount(): number {
+  return app.downloads.filter((d) => ACTIVE_DOWNLOAD.includes(d.status)).length;
+}
+
 let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
 export function toast(text: string, error = false) {

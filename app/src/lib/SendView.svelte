@@ -1,7 +1,7 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import { app, share } from "./store.svelte";
-  import { bytes } from "./format";
+  import { bytes, exactCount } from "./format";
   import ShareTicket from "./ShareTicket.svelte";
 
   async function pick(directory: boolean) {
@@ -49,7 +49,10 @@
 </section>
 
 <section aria-label="Your shares">
-  <h2>Shared now</h2>
+  <h2>
+    Shared now
+    {#if app.shares.length > 0}<span class="h-count">{exactCount(app.shares.length)}</span>{/if}
+  </h2>
   {#if app.shares.length === 0}
     <div class="empty glass">
       <img src="/ferry-icon.png" alt="" width="96" height="96" />

@@ -1,5 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { bytes, duration, plural, shortId, shortPath } from "./format";
+import { bytes, compactCount, duration, exactCount, plural, shortId, shortPath } from "./format";
+
+describe("compactCount", () => {
+  it("keeps counts below 1000 exact", () => {
+    for (const n of [0, 9, 10, 100, 999]) expect(compactCount(n)).toBe(String(n));
+  });
+
+  it("shortens larger counts to at most four characters", () => {
+    expect(compactCount(1000)).toBe("1K");
+    expect(compactCount(1234)).toBe("1.2K");
+    expect(compactCount(9999)).toBe("10K");
+    expect(compactCount(10_000)).toBe("10K");
+    expect(compactCount(12_345)).toBe("12K");
+    expect(compactCount(123_456)).toBe("123K");
+    expect(compactCount(999_999)).toBe("1M");
+    expect(compactCount(1_234_567)).toBe("1.2M");
+  });
+});
+
+describe("exactCount", () => {
+  it("groups thousands", () => {
+    expect(exactCount(7)).toBe("7");
+    expect(exactCount(12_345)).toBe("12,345");
+  });
+});
 
 describe("bytes", () => {
   it("uses whole bytes below 1 KB and one decimal for small values", () => {
