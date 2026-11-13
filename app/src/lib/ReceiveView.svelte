@@ -3,7 +3,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, message } from "./api";
   import { bytes, plural } from "./format";
-  import { app, checkLink, clearPreview, receive, startDownload } from "./store.svelte";
+  import { app, checkLink, clearPreview, openTicket, receive, startDownload } from "./store.svelte";
   import DownloadRow from "./DownloadRow.svelte";
 
   let settingsDir = $state("");
@@ -13,15 +13,25 @@
   });
 
   async function openTicketFile() {
-    const path = await open({ filters: [{ name: "Ferry ticket", extensions: ["ferry"] }] });
-    if (typeof path !== "string") return;
     try {
-      const text = await api.readShareFile(path);
-      receive.link = "";
-      await checkLink(text);
+      const path = await open({ filters: [{ name: "Ferry ticket", extensions: ["ferry"] }] });
+      if (typeof path === "string") await openTicket(path);
     } catch (err) {
       receive.problem = { title: "Couldn't open the ticket file.", detail: message(err) };
     }
+  }
+
+  function unlockTicket(event: SubmitEvent & { currentTarget: HTMLFormElement }) {
+    event.preventDefault();
+    const path = receive.protectedTicket;
+    if (!path || receive.openingTicket) return;
+    const password = new FormData(event.currentTarget).get("password");
+    event.currentTarget.reset();
+    if (typeof password === "string" && password) void openTicket(path, password);
+  }
+
+  function focusPassword(input: HTMLInputElement) {
+    input.focus();
   }
 
   async function chooseDest() {
@@ -56,11 +66,28 @@
     <button class:primary={!receive.preview} type="submit" disabled={receive.checking || !receive.link.trim()}>
       Check link
     </button>
-    <button type="button" onclick={openTicketFile} disabled={receive.checking}>Open ticket file</button>
+    <button type="button" onclick={openTicketFile} disabled={receive.checking || receive.openingTicket}>
+      Open ticket file
+    </button>
   </form>
+
+  {#if receive.protectedTicket}
+    {#key receive.protectedTicket}
+      <form class="unlock glass" onsubmit={unlockTicket}>
+        <label for="ticket-password">Password for {receive.protectedTicket.split(/[\\/]/).at(-1)}</label>
+        <div class="paste">
+          <input id="ticket-password" name="password" type="password" autocomplete="off" use:focusPassword required />
+          <button class="primary" type="submit" disabled={receive.openingTicket}>Unlock ticket</button>
+          <button class="quiet" type="button" onclick={clearPreview}>Cancel</button>
+        </div>
+      </form>
+    {/key}
+  {/if}
 
   {#if receive.checking}
     <p class="muted status" aria-live="polite">Contacting the sender…</p>
+  {:else if receive.openingTicket}
+    <p class="muted status" aria-live="polite">{receive.protectedTicket ? "Unlocking ticket…" : "Opening ticket…"}</p>
   {:else if receive.problem}
     <div class="problem glass" role="alert">
       <p><strong>{receive.problem.title}</strong></p>
@@ -150,6 +177,15 @@
 
   .status {
     margin-top: 1rem;
+  }
+
+  .unlock {
+    display: grid;
+    gap: 0.6rem;
+    margin-top: 1rem;
+    padding: 0.85rem 1.1rem;
+    border-radius: 12px;
+    overflow-wrap: anywhere;
   }
 
   .problem {

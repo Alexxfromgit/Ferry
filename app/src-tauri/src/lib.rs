@@ -12,7 +12,7 @@ use std::{
 
 use ferry_core::{
     Config, DownloadInfo, DownloadStatus, Event, Node, NodeStatus, Preview, RelayChoice,
-    SHARE_FILE_EXTENSION, ShareInfo, ShareLink,
+    SHARE_FILE_EXTENSION, ShareInfo, ShareLink, TicketFile, TicketPassword,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -28,8 +28,6 @@ use tauri_plugin_opener::OpenerExt;
 const EVENT: &str = "ferry-event";
 const OPEN_LINK: &str = "ferry-open-link";
 const RESYNC: &str = "ferry-resync";
-/// `.ferry` files are small JSON; anything bigger is not one.
-const MAX_SHARE_FILE: u64 = 1024 * 1024;
 const MAX_LOG: u64 = 5 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +42,21 @@ struct AppState {
     node: Node,
     settings: Mutex<Settings>,
     settings_path: PathBuf,
-    pending_links: Mutex<Vec<String>>,
+    pending_links: Mutex<Vec<IncomingShare>>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum IncomingShare {
+    Link { link: String },
+    File { path: PathBuf },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum OpenedTicket {
+    Ready { link: String },
+    PasswordRequired,
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -112,19 +124,25 @@ async fn remove_share(state: State<'_, AppState>, id: String) -> CmdResult<()> {
 
 /// Write a `.ferry` file. The extension is always `.ferry`, whatever the path says.
 #[tauri::command]
-fn save_share_file(state: State<'_, AppState>, id: String, path: PathBuf) -> CmdResult<()> {
+async fn save_share_file(
+    state: State<'_, AppState>,
+    id: String,
+    path: PathBuf,
+    password: Option<String>,
+) -> CmdResult<()> {
     let file = state.node.share_file(&id).map_err(fail)?;
-    let has_ext = path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case(SHARE_FILE_EXTENSION));
-    let path = if has_ext {
+    let path = if has_ticket_extension(&path) {
         path
     } else {
         let mut name = path.into_os_string();
         name.push(format!(".{SHARE_FILE_EXTENSION}"));
         PathBuf::from(name)
     };
-    ferry_core::write_atomic(&path, file.to_json().as_bytes()).map_err(fail)
+    let password = password.map(|value| TicketPassword::from(value.into_boxed_str()));
+    tauri::async_runtime::spawn_blocking(move || file.save(&path, password))
+        .await
+        .map_err(fail)?
+        .map_err(fail)
 }
 
 /// The share link as an SVG QR code, built from the current addresses.
@@ -141,24 +159,33 @@ fn share_qr(state: State<'_, AppState>, id: String) -> CmdResult<String> {
         .build())
 }
 
-/// Read a `.ferry` file chosen in the open dialog or dropped on the window.
+/// Read a `.ferry` file opened from the desktop, picker, or drop handler.
 #[tauri::command]
-fn read_share_file(path: PathBuf) -> CmdResult<String> {
-    read_share_file_checked(&path)
+async fn read_share_file(path: PathBuf, password: Option<String>) -> CmdResult<OpenedTicket> {
+    let password = password.map(|value| TicketPassword::from(value.into_boxed_str()));
+    tauri::async_runtime::spawn_blocking(move || read_share_file_checked(&path, password))
+        .await
+        .map_err(fail)?
 }
 
-fn read_share_file_checked(path: &Path) -> CmdResult<String> {
-    let is_share_file = path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case(SHARE_FILE_EXTENSION));
-    if !is_share_file {
+fn read_share_file_checked(
+    path: &Path,
+    password: Option<TicketPassword>,
+) -> CmdResult<OpenedTicket> {
+    if !has_ticket_extension(path) {
         return Err("That is not a Ferry ticket file (.ferry).".into());
     }
-    let meta = std::fs::metadata(path).map_err(fail)?;
-    if !meta.is_file() || meta.len() > MAX_SHARE_FILE {
-        return Err("That file is too large to be a Ferry ticket.".into());
-    }
-    std::fs::read_to_string(path).map_err(fail)
+    let link = match (TicketFile::read(path).map_err(fail)?, password) {
+        (TicketFile::Ready(link), None) => link,
+        (TicketFile::Protected(_), None) => return Ok(OpenedTicket::PasswordRequired),
+        (TicketFile::Protected(ticket), Some(password)) => ticket.unlock(password).map_err(fail)?,
+        (TicketFile::Ready(_), Some(_)) => {
+            return Err("The ticket file changed. Open it again.".into());
+        }
+    };
+    Ok(OpenedTicket::Ready {
+        link: link.to_url(),
+    })
 }
 
 #[tauri::command]
@@ -231,7 +258,7 @@ fn set_settings(state: State<'_, AppState>, settings: Settings) -> CmdResult<boo
 
 /// Links that arrived from outside (deep link, opened file, second launch) since last asked.
 #[tauri::command]
-fn take_pending_links(state: State<'_, AppState>) -> Vec<String> {
+fn take_pending_links(state: State<'_, AppState>) -> Vec<IncomingShare> {
     std::mem::take(&mut *state.pending_links.lock().unwrap())
 }
 
@@ -243,17 +270,26 @@ fn is_ferry_url(arg: &str) -> bool {
         .is_some_and(|p| p.eq_ignore_ascii_case("ferry://"))
 }
 
-/// Turn a command-line argument or URL into share-link text, if it is one.
-fn link_from_arg(arg: &str) -> Option<String> {
-    let arg = arg.trim();
+fn has_ticket_extension(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(SHARE_FILE_EXTENSION))
+}
+
+/// Recognize incoming links and paths without opening files on the event thread.
+fn link_from_arg(arg: &str) -> Option<IncomingShare> {
     if is_ferry_url(arg) {
-        return Some(arg.to_string());
+        return Some(IncomingShare::Link {
+            link: arg.trim().to_string(),
+        });
     }
-    read_share_file_checked(Path::new(arg)).ok()
+    let path = Path::new(arg);
+    has_ticket_extension(path).then(|| IncomingShare::File {
+        path: path.to_owned(),
+    })
 }
 
 fn accept_links(app: &AppHandle, args: impl IntoIterator<Item = String>) {
-    let links: Vec<String> = args.into_iter().filter_map(|a| link_from_arg(&a)).collect();
+    let links: Vec<_> = args.into_iter().filter_map(|a| link_from_arg(&a)).collect();
     if links.is_empty() {
         return;
     }
@@ -535,18 +571,23 @@ mod tests {
     #[test]
     fn recognizes_links_and_share_files() {
         assert_eq!(
-            link_from_arg("FERRY://get?t=abc").as_deref(),
-            Some("FERRY://get?t=abc")
+            link_from_arg("FERRY://get?t=abc"),
+            Some(IncomingShare::Link {
+                link: "FERRY://get?t=abc".into()
+            })
         );
         assert!(link_from_arg("--flag").is_none());
         let dir = tempfile_dir();
         let file = dir.join("x.ferry");
         std::fs::write(&file, "{\"ticket\":\"t\"}").unwrap();
-        assert!(link_from_arg(file.to_str().unwrap()).is_some());
+        assert_eq!(
+            link_from_arg(file.to_str().unwrap()),
+            Some(IncomingShare::File { path: file })
+        );
         let other = dir.join("x.txt");
         std::fs::write(&other, "secret").unwrap();
         assert!(link_from_arg(other.to_str().unwrap()).is_none());
-        assert!(read_share_file_checked(&other).is_err());
+        assert!(read_share_file_checked(&other, None).is_err());
     }
 
     #[test]

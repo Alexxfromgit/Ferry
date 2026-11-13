@@ -7,7 +7,9 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+age = "0.12.1"
 anyhow.workspace = true
+flate2 = "1"
 iroh.workspace = true
 iroh-blobs.workspace = true
 irpc.workspace = true
@@ -19,7 +21,7 @@ serde_json.workspace = true
 walkdir.workspace = true
 hex.workspace = true
 futures-buffered.workspace = true
+tempfile.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tracing-subscriber.workspace = true
