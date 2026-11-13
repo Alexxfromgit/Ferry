@@ -39,6 +39,13 @@ if "$bundle"; then
         Linux) bundle_args=(--bundles deb,appimage) ;;
         *) echo "Use build.ps1 to build Windows installers." >&2; exit 2 ;;
     esac
+    if [[ -n "${FERRY_UPDATER_PUBLIC_KEY:-}" ]]; then
+        update_config=$(node -p 'JSON.stringify({
+            bundle: { createUpdaterArtifacts: true },
+            plugins: { updater: { pubkey: process.env.FERRY_UPDATER_PUBLIC_KEY } },
+        })')
+        bundle_args+=(--config "$update_config")
+    fi
 fi
 
 npm --prefix app run tauri -- build "${bundle_args[@]}" -- --locked

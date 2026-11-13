@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DownloadInfo, NodeStatus, Preview, Settings, ShareInfo } from "./types";
+import type { DownloadInfo, NodeStatus, Preview, Settings, ShareInfo, UpdateInfo } from "./types";
 
 type IncomingShare = { kind: "link"; link: string } | { kind: "file"; path: string };
 type OpenedTicket = { kind: "ready"; link: string } | { kind: "passwordRequired" };
@@ -26,6 +26,10 @@ export const api = {
   revealDownload: (id: string) => invoke<void>("reveal_download", { id }),
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<boolean>("set_settings", { settings }),
+  updateInfo: () => invoke<UpdateInfo>("update_info"),
+  setAutoCheckUpdates: (enabled: boolean) => invoke<void>("set_auto_check_updates", { enabled }),
+  checkForUpdates: (automatic: boolean) => invoke<string | null>("check_for_updates", { automatic }),
+  installUpdate: () => invoke<void>("install_update"),
   takePendingLinks: () => invoke<IncomingShare[]>("take_pending_links"),
 };
 
