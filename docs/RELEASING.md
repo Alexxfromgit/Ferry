@@ -206,6 +206,20 @@ aliases, `ferry-direct` and `upload`. Without `PLAY_SERVICE_ACCOUNT_JSON`, the P
 the bundle in the run's `android-play` artifact for a manual upload. Keep the keystores and the
 JSON key backed up in your password manager.
 
+### Check the setup
+
+After setting or changing any of these values, run **Actions → Android release check → Run
+workflow** on `main`, or `gh workflow run android-release-check.yml --ref main`. It builds and
+publishes nothing. It checks that:
+
+- each keystore opens with its password and alias;
+- the Direct key matches `FERRY_DIRECT_CERT_SHA256`;
+- R2 accepts a test file and `downloads.xenvaultinteractive.com` serves it (it deletes the file
+  afterwards) and allows the website's origin;
+- the service account can open an edit on the Play app.
+
+A failing step names the value to fix.
+
 ### Build a signed bundle or APK locally
 
 The Gradle build reads signing keys from environment variables, or from
