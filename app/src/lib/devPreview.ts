@@ -18,7 +18,7 @@ const shares: ShareInfo[] = [
     fileCount: 148,
     totalSize: 621_600_000,
     createdAt: now - 3600,
-    link: "ferry://get?t=blobaa5jnzjibhu5omj572hveqe33ruu5itl",
+    link: "https://ferry.xenvaultinteractive.com/get#blobaa5jnzjibhu5omj572hveqe33ruu5itl",
     ticket: "blobaa5jnzjibhu5omj572hveqe33ruu5itl",
     skipped: [
       { name: "Holiday in Lisbon/.DS_Store", reason: "systemFile" },
@@ -34,7 +34,7 @@ const shares: ShareInfo[] = [
     fileCount: 1,
     totalSize: 2_340_000,
     createdAt: now - 86400 * 2,
-    link: "ferry://get?t=blobaafakesecond",
+    link: "https://ferry.xenvaultinteractive.com/get#blobaafakesecond",
     ticket: "blobaafakesecond",
   },
   {
@@ -44,7 +44,7 @@ const shares: ShareInfo[] = [
     fileCount: 12,
     totalSize: 838_000_000,
     createdAt: now - 86400 * 9,
-    link: "ferry://get?t=blobaafakethird",
+    link: "https://ferry.xenvaultinteractive.com/get#blobaafakethird",
     ticket: "blobaafakethird",
     paused: true,
   },
@@ -55,7 +55,7 @@ const shares: ShareInfo[] = [
     fileCount: 1,
     totalSize: 1_200_000 + i * 310_000,
     createdAt: now - 86400 * (10 + i),
-    link: `ferry://get?t=blobaafake${i}`,
+    link: `https://ferry.xenvaultinteractive.com/get#blobaafake${i}`,
     ticket: `blobaafake${i}`,
   })),
 ];
