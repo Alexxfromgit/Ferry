@@ -217,3 +217,220 @@ jobs:
           fi
           gh release upload "$TAG" ./* --clobber --repo "$GITHUB_REPOSITORY"
           gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
+
+  # Android starts once the Direct signing certificate is configured; see docs/RELEASING.md.
+  # Both channels are built from the tag: the Direct APK (ferry/android on R2, with its update
+  # feed) and the Play bundle (the internal testing track). Neither goes on the GitHub release.
+  build-android:
+    name: Android
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && vars.FERRY_DIRECT_CERT_SHA256 != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment: android-release
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm --prefix app ci
+      - name: Write the signing keys
+        env:
+          DIRECT_KEYSTORE: ${{ secrets.ANDROID_DIRECT_KEYSTORE_B64 }}
+          UPLOAD_KEYSTORE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_B64 }}
+        run: |
+          if [[ -z "$DIRECT_KEYSTORE" || -z "$UPLOAD_KEYSTORE" ]]; then
+            echo "::error::Set ANDROID_DIRECT_KEYSTORE_B64 and ANDROID_UPLOAD_KEYSTORE_B64 in the android-release environment. See docs/RELEASING.md."
+            exit 1
+          fi
+          base64 --decode <<<"$DIRECT_KEYSTORE" > "$RUNNER_TEMP/direct.p12"
+          base64 --decode <<<"$UPLOAD_KEYSTORE" > "$RUNNER_TEMP/upload.p12"
+      - name: Build the Direct APK
+        env:
+          ORG_GRADLE_PROJECT_ferryDist: direct
+          ANDROID_DIRECT_KEYSTORE: ${{ runner.temp }}/direct.p12
+          ANDROID_DIRECT_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_DIRECT_KEYSTORE_PASSWORD }}
+          ANDROID_DIRECT_KEY_ALIAS: ${{ vars.ANDROID_DIRECT_KEY_ALIAS || 'ferry-direct' }}
+          ANDROID_DIRECT_KEY_PASSWORD: ${{ secrets.ANDROID_DIRECT_KEYSTORE_PASSWORD }}
+          FERRY_DIRECT_CERT_SHA256: ${{ vars.FERRY_DIRECT_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          npm --prefix app run tauri android build -- --apk --target aarch64 armv7
+          apk="android-direct/Ferry-${TAG#v}-android.apk"
+          mkdir -p android-direct
+          mv app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk "$apk"
+          node scripts/android-release.mjs verify "$apk" --tag "$TAG" --cert "$FERRY_DIRECT_CERT_SHA256"
+      - name: Build the Play bundle
+        env:
+          ORG_GRADLE_PROJECT_ferryDist: play
+          ANDROID_UPLOAD_KEYSTORE: ${{ runner.temp }}/upload.p12
+          ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          ANDROID_UPLOAD_KEY_ALIAS: ${{ vars.ANDROID_UPLOAD_KEY_ALIAS || 'upload' }}
+          ANDROID_UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          npm --prefix app run tauri android build -- --aab --target aarch64 armv7 x86_64
+          outputs=app/src-tauri/gen/android/app/build/outputs
+          aab="android-play/Ferry-${TAG#v}-play.aab"
+          mkdir -p android-play
+          mv "$outputs/bundle/universalRelease/app-universal-release.aab" "$aab"
+          mv "$outputs/mapping/universalRelease/mapping.txt" android-play/mapping.txt
+          if ! keytool -printcert -jarfile "$aab" | grep -q 'SHA256:'; then
+            echo "::error::The Play bundle is not signed."
+            exit 1
+          fi
+      - name: Remove the signing keys
+        if: always()
+        run: rm -f "$RUNNER_TEMP/direct.p12" "$RUNNER_TEMP/upload.p12"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-direct
+          path: android-direct/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-play
+          path: android-play/
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  # The APK goes up first and has to download intact from the public host before latest.json,
+  # which installed Direct apps read, points at it.
+  publish-android-direct:
+    name: Publish Android (Direct)
+    needs: [prepare, build-android, publish]
+    if: ${{ !cancelled() && needs.build-android.result == 'success' && needs.publish.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: android-release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      BUCKET: ${{ vars.R2_BUCKET }}
+      R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      # R2 rejects some of the checksum headers newer AWS CLIs send by default.
+      AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+      AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      FERRY_DIRECT_CERT_SHA256: ${{ vars.FERRY_DIRECT_CERT_SHA256 }}
+    steps:
+      - name: Check the R2 configuration
+        run: |
+          if [[ -z "$BUCKET" || -z "$R2_ACCOUNT_ID" || -z "$AWS_ACCESS_KEY_ID" || -z "$AWS_SECRET_ACCESS_KEY" ]]; then
+            echo "::error::Set the R2_BUCKET and R2_ACCOUNT_ID variables and the R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY secrets. See docs/RELEASING.md."
+            exit 1
+          fi
+          echo "AWS_ENDPOINT_URL=https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - uses: actions/download-artifact@v8
+        with:
+          name: android-direct
+          path: android-direct
+      - name: Prepare the update feed
+        id: feed
+        run: |
+          set -euo pipefail
+          live="$RUNNER_TEMP/live.json"
+          errors="$RUNNER_TEMP/get-feed.log"
+          if ! aws s3api get-object --bucket "$BUCKET" --key ferry/android/latest.json "$live" >/dev/null 2>"$errors"; then
+            # The first release has no feed yet; any other error stops the run.
+            if ! grep -q NoSuchKey "$errors"; then
+              cat "$errors"
+              exit 1
+            fi
+            rm -f "$live"
+          fi
+          node scripts/android-release.mjs prepare android-direct/*.apk --tag "$TAG" \
+            --cert "$FERRY_DIRECT_CERT_SHA256" --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/r2" --current "$live"
+      - uses: actions/attest@v4
+        if: steps.feed.outputs.publish == 'true'
+        with:
+          subject-path: ${{ steps.feed.outputs.apk_path }}
+      - name: Upload the APK, then the feed
+        if: steps.feed.outputs.publish == 'true'
+        env:
+          APK_KEY: ${{ steps.feed.outputs.apk_key }}
+          APK_PATH: ${{ steps.feed.outputs.apk_path }}
+          FEED_PATH: ${{ steps.feed.outputs.feed_path }}
+          SHA256: ${{ steps.feed.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          aws s3 cp "$APK_PATH" "s3://$BUCKET/$APK_KEY" --only-show-errors \
+            --content-type application/vnd.android.package-archive \
+            --cache-control "public, max-age=31536000, immutable" --metadata "sha256=$SHA256"
+          url="https://downloads.xenvaultinteractive.com/$APK_KEY"
+          public=$(curl -fsSL --retry 3 "$url" | sha256sum | cut -d' ' -f1)
+          if [[ "$public" != "$SHA256" ]]; then
+            echo "::error::$url does not serve the uploaded APK, so the feed was left as it was."
+            exit 1
+          fi
+          aws s3 cp "$FEED_PATH" "s3://$BUCKET/ferry/android/latest.json" --only-show-errors \
+            --content-type application/json --cache-control no-cache
+
+  publish-play:
+    name: Publish Android (Google Play)
+    needs: [prepare, build-android, publish]
+    if: ${{ !cancelled() && needs.build-android.result == 'success' && needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: android-release
+    permissions:
+      contents: read
+    env:
+      HAS_PLAY_ACCOUNT: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON != '' }}
+    steps:
+      - name: Check the Play configuration
+        if: env.HAS_PLAY_ACCOUNT == 'false'
+        run: echo "::notice::Set PLAY_SERVICE_ACCOUNT_JSON to upload to Google Play. The bundle is in the android-play artifact for a manual upload."
+      - uses: actions/download-artifact@v8
+        if: env.HAS_PLAY_ACCOUNT == 'true'
+        with:
+          name: android-play
+          path: android-play
+      - uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
+        if: env.HAS_PLAY_ACCOUNT == 'true'
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.xenvaultinteractive.ferry
+          releaseFiles: android-play/*.aab
+          releaseName: ${{ needs.prepare.outputs.tag }}
+          track: internal
+          # Google Play only takes draft releases until the app's first review has passed.
+          status: ${{ vars.PLAY_RELEASE_STATUS || 'draft' }}
+          mappingFile: android-play/mapping.txt

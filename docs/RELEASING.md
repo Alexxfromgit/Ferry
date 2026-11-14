@@ -9,6 +9,7 @@ The Release workflow builds installers for Windows x64, Apple silicon and Intel 
 and Linux x64. It runs CI against the tagged source and publishes the draft when all checks
 and builds pass. It uploads SHA-256 checksums, GitHub build attestations, and a Tauri
 update feed with signed packages for Windows MSI and NSIS, both Macs, and Linux AppImage.
+Once the [Android setup](#android) is done, the same run also publishes the Android app.
 
 ## Configure automation
 
@@ -70,3 +71,144 @@ Get-FileHash -Algorithm SHA256 ./Ferry-0.1.0-windows-x64.exe
 shasum -a 256 Ferry-0.1.0-macos-arm64.dmg
 gh attestation verify Ferry-0.1.0-macos-arm64.dmg --repo Alexxfromgit/Ferry
 ```
+
+The Android APK isn't on the GitHub release; its SHA-256 is in
+`https://downloads.xenvaultinteractive.com/ferry/android/latest.json`, and the attestation
+check works the same way. To check who signed it, compare the SHA-256 digest that
+`apksigner verify --print-certs Ferry-0.3.0-android.apk` prints with the Direct certificate
+fingerprint published on ferry.xenvaultinteractive.com.
+
+```sh
+gh attestation verify Ferry-0.3.0-android.apk --repo Alexxfromgit/Ferry
+```
+
+## Android
+
+The Android app ships in two channels built from the same project (see
+[CONTRIBUTING](../CONTRIBUTING.md#android)). Neither goes on the GitHub release.
+
+| | Direct | Google Play |
+| --- | --- | --- |
+| Package | `com.xenvaultinteractive.ferry.direct` | `com.xenvaultinteractive.ferry` |
+| Published as | APK on `downloads.xenvaultinteractive.com` (Cloudflare R2) | Bundle on the internal testing track |
+| Signed with | The Direct key, which you keep | Your upload key; Google re-signs with the app signing key |
+| Updates | Installed copies read `ferry/android/latest.json` | Google Play |
+
+The Release workflow's Android jobs run only when the repository variable
+`FERRY_DIRECT_CERT_SHA256` is set. Until then, releases ship the desktop app alone. With it set:
+
+1. **Android** builds the Direct APK (arm64 and armv7) and the Play bundle (arm64, armv7 and
+   x86_64) from the tag. It checks the APK's package, version, signer and that it isn't
+   debuggable.
+2. After the GitHub release is published, **Publish Android (Direct)** uploads the APK to
+   `ferry/android/releases/<versionCode>/Ferry-X.Y.Z-android.apk`. It checks the APK downloads
+   intact from the public host and attests it, and only then replaces `ferry/android/latest.json`.
+   It never replaces the feed with an older version, and does nothing if this version is already
+   live.
+3. **Publish Android (Google Play)** uploads the bundle and its R8 mapping file to the internal
+   track. Promote it to closed testing or production in Play Console. Google Play refuses a
+   version code it already has, so after a partial failure use **Re-run failed jobs** rather than
+   re-running everything.
+
+### Create the keys and accounts
+
+Work in a folder outside the repository, for example `C:\Users\<you>\keys\ferry`. Create every
+password in your password manager and save it there straight away. `keytool` comes with the JDK.
+
+**Direct signing key.** Create it, then note the `SHA256:` fingerprint the second command prints.
+
+```powershell
+keytool -genkeypair -v -storetype PKCS12 -keystore ferry-direct.p12 -alias ferry-direct -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Ferry, O=Xenvault Interactive"
+keytool -list -v -keystore ferry-direct.p12 -alias ferry-direct
+```
+
+PKCS12 keystores use one password for the store and the key. The `-dname` text is public: it's
+inside every APK. Back up `ferry-direct.p12` and its password offline as well. **Nothing can
+replace this key**: without it Direct users can't update, and have to uninstall and reinstall.
+
+**Play upload key.** Repeat with `-keystore ferry-upload.p12 -alias upload`. Play support can
+reset a lost or leaked upload key.
+
+**Google Play Console.**
+
+1. Create the app: name Ferry, App, Free.
+2. Build the first bundle locally (below) and upload it under **Testing → Internal testing →
+   Create release**, keeping the Google-generated app signing key. This first upload sets the
+   package name.
+3. Under **Test and release → App integrity → App signing**, copy the app signing key's
+   SHA-256. The website's `assetlinks.json` needs it along with the Direct fingerprint.
+4. Under Android developer verification, register `com.xenvaultinteractive.ferry.direct` with
+   the Direct fingerprint, so the APK keeps installing on certified devices.
+
+**Play service account**, for the workflow's uploads.
+
+1. In the Google Cloud console, create a project and enable the **Google Play Android
+   Developer API**.
+2. **IAM & Admin → Service accounts → Create** an account with no Cloud roles. Under **Keys →
+   Add key**, download a JSON key.
+3. In Play Console, **Users and permissions → Invite new users**: add the service account's
+   email with access to Ferry and the **Release apps to testing tracks** and **View app
+   information** permissions. It can take a day to start working.
+
+**Cloudflare R2.**
+
+1. Create a bucket, for example `xenvault-downloads`.
+2. Under the bucket's **Settings → Custom Domains**, connect `downloads.xenvaultinteractive.com`.
+   Leave the public `r2.dev` URL disabled.
+3. Add a CORS policy allowing `GET` and `HEAD` from `https://ferry.xenvaultinteractive.com`,
+   for the website's download page.
+4. Under **R2 → Manage API tokens**, create an account API token with **Object Read & Write**
+   for that bucket only. Copy the access key ID and secret access key.
+
+### Configure GitHub
+
+Create an environment named `android-release` under **Settings → Environments**, and limit its
+deployment branches to `main`. Its secrets are only given to the Android release jobs.
+
+Encode each keystore for its secret, then set the secrets with the GitHub CLI. It prompts for
+values that aren't piped in, which keeps them out of your shell history.
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("ferry-direct.p12")) | gh secret set ANDROID_DIRECT_KEYSTORE_B64 --env android-release --repo Alexxfromgit/Ferry
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("ferry-upload.p12")) | gh secret set ANDROID_UPLOAD_KEYSTORE_B64 --env android-release --repo Alexxfromgit/Ferry
+gh secret set ANDROID_DIRECT_KEYSTORE_PASSWORD --env android-release --repo Alexxfromgit/Ferry
+Get-Content service-account.json -Raw | gh secret set PLAY_SERVICE_ACCOUNT_JSON --env android-release --repo Alexxfromgit/Ferry
+```
+
+| Kind | Name | Value |
+| --- | --- | --- |
+| Environment secret | `ANDROID_DIRECT_KEYSTORE_B64` | The Direct keystore, base64 |
+| Environment secret | `ANDROID_DIRECT_KEYSTORE_PASSWORD` | Its password |
+| Environment secret | `ANDROID_UPLOAD_KEYSTORE_B64` | The upload keystore, base64 |
+| Environment secret | `ANDROID_UPLOAD_KEYSTORE_PASSWORD` | Its password |
+| Environment secret | `PLAY_SERVICE_ACCOUNT_JSON` | The service account's JSON key |
+| Environment secret | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | The R2 API token's keys |
+| Repository variable | `R2_ACCOUNT_ID` | Your Cloudflare account ID |
+| Repository variable | `R2_BUCKET` | The bucket name |
+| Repository variable | `FERRY_DIRECT_CERT_SHA256` | The Direct fingerprint; setting it turns the Android jobs on |
+| Repository variable | `PLAY_RELEASE_STATUS` | Optional. `completed` once the app's first review has passed, so internal testers get each build at once. Until then Google Play only accepts `draft` releases, the default |
+
+`ANDROID_DIRECT_KEY_ALIAS` and `ANDROID_UPLOAD_KEY_ALIAS` variables override the default key
+aliases, `ferry-direct` and `upload`. Without `PLAY_SERVICE_ACCOUNT_JSON`, the Play job leaves
+the bundle in the run's `android-play` artifact for a manual upload. Delete the base64 and JSON
+files once the secrets are set; keep your backups in the password manager.
+
+### Build a signed bundle or APK locally
+
+The Gradle build reads signing keys from environment variables, or from
+`app/src-tauri/gen/android/keystore.properties` (gitignored) with keys such as
+`uploadStoreFile`, `uploadStorePassword`, `uploadKeyAlias` and `uploadKeyPassword`. For the
+first Play upload, in PowerShell from the repository root:
+
+```powershell
+$env:ORG_GRADLE_PROJECT_ferryDist = 'play'
+$env:ANDROID_UPLOAD_KEYSTORE = 'C:\Users\<you>\keys\ferry\ferry-upload.p12'
+$env:ANDROID_UPLOAD_KEY_ALIAS = 'upload'
+$env:ANDROID_UPLOAD_KEYSTORE_PASSWORD = Read-Host -MaskInput 'Upload key password'
+$env:ANDROID_UPLOAD_KEY_PASSWORD = $env:ANDROID_UPLOAD_KEYSTORE_PASSWORD
+npm --prefix app run tauri android build -- --aab --target aarch64 armv7 x86_64
+```
+
+The bundle is `app/src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab`.
+For a Direct APK, use `ferryDist = 'direct'`, the `ANDROID_DIRECT_*` variables and
+`--apk --target aarch64 armv7`.

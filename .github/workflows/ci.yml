@@ -63,6 +63,46 @@ jobs:
         shell: pwsh
         run: ./build.ps1 -Check
 
+  android:
+    name: Android (debug builds)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Test the release scripts
+        run: node --test scripts/
+      - run: npm --prefix app ci
+      - name: Build the Play and Direct apps
+        run: |
+          set -euo pipefail
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          out=app/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
+          for dist in play direct; do
+            ORG_GRADLE_PROJECT_ferryDist="$dist" npm --prefix app run tauri android build -- --debug --apk --target aarch64
+            mv "$out" "$RUNNER_TEMP/ferry-$dist.apk"
+          done
+      - name: Check each channel's package, permissions and libraries
+        run: node scripts/android-release.mjs check-channels "$RUNNER_TEMP/ferry-play.apk" "$RUNNER_TEMP/ferry-direct.apk"
+
   msrv:
     name: Minimum Rust version (core and CLI)
     runs-on: ubuntu-22.04
