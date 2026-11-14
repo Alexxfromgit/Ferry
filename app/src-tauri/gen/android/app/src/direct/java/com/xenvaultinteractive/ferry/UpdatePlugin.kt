@@ -219,10 +219,17 @@ class UpdatePlugin(private val activity: Activity) : Plugin(activity) {
         return connection.inputStream
     }
 
+    /** Read at most [limit] bytes, failing as soon as there are more. */
     private fun InputStream.readBounded(limit: Int): ByteArray {
-        val bytes = readBytes()
-        if (bytes.size > limit) throw IOException("The update feed is too large.")
-        return bytes
+        val out = java.io.ByteArrayOutputStream()
+        val buffer = ByteArray(8 * 1024)
+        while (true) {
+            val n = read(buffer, 0, minOf(buffer.size, limit + 1 - out.size()))
+            if (n < 0) break
+            out.write(buffer, 0, n)
+            if (out.size() > limit) throw IOException("The update feed is too large.")
+        }
+        return out.toByteArray()
     }
 
     private fun sha256Of(file: File): String {

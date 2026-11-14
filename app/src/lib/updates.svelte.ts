@@ -1,5 +1,5 @@
 import { api, message } from "./api";
-import { activeDownloadCount, app } from "./store.svelte";
+import { activeDownloadCount, app, isMobile } from "./store.svelte";
 import type { UpdateInfo } from "./types";
 
 export const updates = $state({
@@ -68,6 +68,8 @@ export function transferring() {
   return (
     app.importing !== null ||
     activeDownloadCount() > 0 ||
+    // Phones copy finished downloads into Downloads.
+    Object.values(app.saved).some((saved) => saved.state === "saving") ||
     Object.values(app.activity).some((share) => share.activePeers > 0)
   );
 }
@@ -78,6 +80,12 @@ export async function restartToUpdate() {
   updates.status = "";
   try {
     await api.installUpdate();
+    // Desktop installers quit Ferry. On phones this only opened Android's installer (or Play's
+    // restart), and Ferry is still here if the user backed out: offer the update again.
+    if (isMobile()) {
+      updates.installing = false;
+      await refresh().catch(() => {});
+    }
   } catch (err) {
     updates.status = message(err);
     try {

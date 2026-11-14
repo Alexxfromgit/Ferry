@@ -453,6 +453,9 @@ fn forward_events(app: AppHandle, node: &Node) {
                 }
                 // Some events were missed: have the UI reload its lists.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // The phone side catches up too: the notification and pending saves.
+                    #[cfg(target_os = "android")]
+                    android::resume(&app, false);
                     app.emit(RESYNC, ()).ok();
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -766,7 +769,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(target_os = "android")]
     {
         app.manage(android::Phone::load(config_dir.join("saved.json")));
-        android::resume(app.handle());
+        android::start(app.handle());
     }
 
     #[cfg(desktop)]

@@ -12,7 +12,7 @@ use tauri::{
     plugin::{Builder, PluginHandle, TauriPlugin},
 };
 
-use crate::{AppState, CmdResult, fail, save_settings};
+use crate::{AppState, CmdResult, android::Phone, fail, save_settings};
 
 struct Updater<R: Runtime>(PluginHandle<R>);
 
@@ -52,8 +52,22 @@ struct Ready {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct CheckArgs {
     automatic: bool,
+    /// Whether an update may install right away (Play's immediate flow restarts the app).
+    allow_immediate: bool,
+}
+
+/// Whether installing now would cut off work: a transfer, or files being copied into
+/// Downloads.
+fn busy(app: &AppHandle, state: &AppState) -> bool {
+    state
+        .node
+        .list_downloads()
+        .iter()
+        .any(|download| download.status.is_active())
+        || app.try_state::<Phone>().is_some_and(|phone| phone.saving())
 }
 
 /// Run an `UpdatePlugin` command on a blocking thread (the call waits for Android's answer).
@@ -112,24 +126,21 @@ pub async fn check_for_updates(
     if automatic && !state.settings.lock().unwrap().auto_check_updates {
         return Ok(None);
     }
-    let ready: Ready = call(&app, "check", CheckArgs { automatic })
-        .await
-        .map_err(|error| {
-            tracing::warn!("update check failed: {error}");
-            "Ferry couldn't check for updates. Try again in a moment.".to_owned()
-        })?;
+    let args = CheckArgs {
+        automatic,
+        allow_immediate: !busy(&app, &state),
+    };
+    let ready: Ready = call(&app, "check", args).await.map_err(|error| {
+        tracing::warn!("update check failed: {error}");
+        "Ferry couldn't check for updates. Try again in a moment.".to_owned()
+    })?;
     Ok(ready.ready_version)
 }
 
 #[tauri::command]
 pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     // Installing replaces the running app, which would cut off a transfer.
-    if state
-        .node
-        .list_downloads()
-        .iter()
-        .any(|download| download.status.is_active())
-    {
+    if busy(&app, &state) {
         return Err("Wait for active transfers to finish before updating.".into());
     }
     call::<serde::de::IgnoredAny>(&app, "install", ())
