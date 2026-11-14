@@ -95,7 +95,7 @@
 </svg>
 
 {#if app.showArtwork === true}
-  <Scene mode={sceneMode} />
+  <Scene mode={sceneMode} phone={isMobile()} />
 {/if}
 
 <div class="shell" class:phone={isMobile()}>
