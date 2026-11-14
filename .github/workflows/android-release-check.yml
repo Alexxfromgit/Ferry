@@ -128,3 +128,8 @@ jobs:
             exit 0
           fi
           node scripts/play-check.mjs com.xenvaultinteractive.ferry
+      - name: Next build number
+        if: ${{ !cancelled() }}
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: node scripts/android-version-code.mjs

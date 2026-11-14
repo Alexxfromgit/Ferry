@@ -12,17 +12,31 @@ import {
   normalizeDigest,
   parseBadging,
   parseSigners,
-  versionCodeOf,
+  parseVersionCode,
   versionOfTag,
 } from "./android-release.mjs";
+import { nextVersionCode } from "./android-version-code.mjs";
 
-test("version codes follow Tauri's formula", () => {
-  assert.equal(versionCodeOf("0.2.0"), 2000);
-  assert.equal(versionCodeOf("1.10.3"), 1_010_003);
-  assert.throws(() => versionCodeOf("1.1000.0"));
-  assert.throws(() => versionCodeOf("1.2.3-beta.1"));
+test("build numbers and tags are validated", () => {
+  assert.equal(parseVersionCode("1"), 1);
+  assert.equal(parseVersionCode("42"), 42);
+  assert.throws(() => parseVersionCode("0"));
+  assert.throws(() => parseVersionCode("1.5"));
+  assert.throws(() => parseVersionCode(undefined));
   assert.equal(versionOfTag("v0.3.0"), "0.3.0");
   assert.throws(() => versionOfTag("0.3.0"));
+});
+
+test("build numbers count up from 1 across both channels", () => {
+  assert.equal(nextVersionCode({}), 1);
+  assert.equal(nextVersionCode({ released: [3] }), 4);
+  // The higher of the Direct feed and Google Play wins.
+  assert.equal(nextVersionCode({ released: [3, 5, 4] }), 6);
+  // A number Google Play took for an upload that was never released is skipped...
+  assert.equal(nextVersionCode({ released: [3], uploaded: [3, 4] }), 5);
+  // ...but an old upload far ahead doesn't hold numbering back.
+  assert.equal(nextVersionCode({ released: [], uploaded: [2000] }), 1);
+  assert.equal(nextVersionCode({ released: [1999], uploaded: [2000] }), 2001);
 });
 
 test("certificate digests accept keytool and apksigner spellings", () => {

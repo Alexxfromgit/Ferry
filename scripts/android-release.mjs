@@ -3,9 +3,9 @@
 //   node scripts/android-release.mjs check-channels <play.apk> <direct.apk>
 //       CI: each channel has its own package, only Direct may install APKs, and only Play
 //       carries Google Play's in-app update library.
-//   node scripts/android-release.mjs verify <direct.apk> --tag vX.Y.Z --cert <sha256>
+//   node scripts/android-release.mjs verify <direct.apk> --tag vX.Y.Z --version-code <n> --cert <sha256>
 //       Release: the APK is the Direct build of that tag, not debuggable, signed with that key.
-//   node scripts/android-release.mjs prepare <direct.apk> --tag vX.Y.Z --cert <sha256>
+//   node scripts/android-release.mjs prepare <direct.apk> --tag vX.Y.Z --version-code <n> --cert <sha256>
 //       --repo owner/name --out <dir> [--current <latest.json>]
 //       Release: verify, then lay out <dir>/ferry/android/{releases/<code>/<apk>,latest.json} as
 //       the bucket stores them. With --current (the feed now live), refuses to go backwards and
@@ -40,13 +40,14 @@ const INSTALL_PERMISSION = "android.permission.REQUEST_INSTALL_PACKAGES";
 // Google Play's in-app update library, as dex type descriptors name it.
 const PLAY_UPDATES_CLASS = Buffer.from("Lcom/google/android/play/core/appupdate/");
 
-/** Tauri's Android versionCode for a semver version: major * 1000000 + minor * 1000 + patch. */
-export function versionCodeOf(version) {
-  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
-  if (!m) throw new Error(`"${version}" is not a plain X.Y.Z version`);
-  const [major, minor, patch] = m.slice(1).map(Number);
-  if (minor > 999 || patch > 999) throw new Error(`${version}: minor and patch must stay below 1000`);
-  return major * 1_000_000 + minor * 1000 + patch;
+/** The build number (versionCode) the release workflow picked; see android-version-code.mjs. */
+export function parseVersionCode(value) {
+  const code = Number(value);
+  // Google Play's maximum versionCode.
+  if (!/^\d+$/.test(String(value ?? "")) || code < 1 || code > 2_100_000_000) {
+    throw new Error(`--version-code must be a build number from 1 up, not "${value}"`);
+  }
+  return code;
 }
 
 export function versionOfTag(tag) {
@@ -193,9 +194,9 @@ export function checkChannels(playApk, directApk) {
 }
 
 /** Checks a release Direct APK; returns its version and digest. */
-export function verifyDirect(apk, tag, cert) {
+export function verifyDirect(apk, tag, buildNumber, cert) {
   const version = versionOfTag(tag);
-  const versionCode = versionCodeOf(version);
+  const versionCode = parseVersionCode(buildNumber);
   const expectedSigner = normalizeDigest(cert);
   const info = badging(apk);
   if (info.package !== DIRECT_PACKAGE) fail(`${basename(apk)} is ${info.package}, expected ${DIRECT_PACKAGE}`);
@@ -212,10 +213,10 @@ export function verifyDirect(apk, tag, cert) {
   return { version, versionCode, sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length };
 }
 
-function prepare(apk, { tag, cert, repo, out, current }) {
+function prepare(apk, { tag, "version-code": versionCode, cert, repo, out, current }) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo ?? "")) fail("--repo must be owner/name");
   if (!out) fail("--out is required");
-  const checked = verifyDirect(apk, tag, cert);
+  const checked = verifyDirect(apk, tag, versionCode, cert);
   const live = current && existsSync(current) ? JSON.parse(readFileSync(current, "utf8")) : null;
   const action = feedAction(live, checked.versionCode);
   const { apkKey, feed } = feedFor({ ...checked, repo, tag, publishedAt: new Date().toISOString() });
@@ -253,11 +254,11 @@ function main([command, ...rest]) {
   const { positional, named } = options(rest);
   if (command === "check-channels" && positional.length === 2) return checkChannels(...positional);
   if (command === "verify" && positional.length === 1) {
-    const { versionCode, sha256 } = verifyDirect(positional[0], named.tag, named.cert);
+    const { versionCode, sha256 } = verifyDirect(positional[0], named.tag, named["version-code"], named.cert);
     return console.log(`ok: ${DIRECT_PACKAGE} versionCode ${versionCode}, sha256 ${sha256}`);
   }
   if (command === "prepare" && positional.length === 1) return prepare(positional[0], named);
-  fail("Usage: android-release.mjs check-channels <play.apk> <direct.apk> | verify <apk> --tag --cert | prepare <apk> --tag --cert --repo --out [--current]");
+  fail("Usage: android-release.mjs check-channels <play.apk> <direct.apk> | verify <apk> --tag --version-code --cert | prepare <apk> --tag --version-code --cert --repo --out [--current]");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

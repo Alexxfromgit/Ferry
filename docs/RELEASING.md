@@ -97,18 +97,24 @@ The Android app ships in two channels built from the same project (see
 The Release workflow's Android jobs run only when the variable `FERRY_DIRECT_CERT_SHA256` is
 set. Until then, releases ship the desktop app alone. With it set:
 
-1. **Android** builds the Direct APK (arm64 and armv7) and the Play bundle (arm64, armv7 and
-   x86_64) from the tag. It checks the APK's package, version, signer and that it isn't
-   debuggable.
+1. **Android** picks the build number, then builds the Direct APK (arm64 and armv7) and the Play
+   bundle (arm64, armv7 and x86_64) from the tag. It checks the APK's package, version, build
+   number, signer and that it isn't debuggable.
 2. After the GitHub release is published, **Publish Android (Direct)** uploads the APK to
-   `ferry/android/releases/<versionCode>/Ferry-X.Y.Z-android.apk`. It checks the APK downloads
+   `ferry/android/releases/<build>/Ferry-X.Y.Z-android.apk`. It checks the APK downloads
    intact from the public host and attests it, and only then replaces `ferry/android/latest.json`.
-   It never replaces the feed with an older version, and does nothing if this version is already
+   It never replaces the feed with an older build, and does nothing if this build is already
    live.
 3. **Publish Android (Google Play)** uploads the bundle and its R8 mapping file to the internal
-   track. Promote it to closed testing or production in Play Console. Google Play refuses a
-   version code it already has, so after a partial failure use **Re-run failed jobs** rather than
-   re-running everything.
+   track, named like `0.3.0 (4)`. Promote it to closed testing or production in Play Console.
+
+**Build numbers.** Android's `versionCode` is a plain counter that both channels share: each
+release builds with one more than the highest build already released on Google Play (any
+track, drafts included) or in the Direct feed. The first release is build 1, and every later
+one adds one, whether the version went from 0.3.0 to 0.3.1 or a release was rebuilt without a
+version change. Numbers Google Play took for uploads that were never released are skipped,
+since it never accepts one twice. The users see the version, such as 0.3.1; Play Console shows
+both. `scripts/android-version-code.mjs` picks the number.
 
 ### Create the keys and accounts
 
@@ -233,6 +239,7 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-21.0.12'
 $env:NDK_HOME = Get-ChildItem "$env:LOCALAPPDATA\Android\Sdk\ndk" | Sort-Object Name | Select-Object -Last 1 -ExpandProperty FullName
 rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 $env:ORG_GRADLE_PROJECT_ferryDist = 'play'
+$env:ORG_GRADLE_PROJECT_ferryVersionCode = '1'   # the build number; see "Build numbers" above
 $env:ANDROID_UPLOAD_KEYSTORE = "$HOME\keys\ferry\ferry-upload.p12"
 $env:ANDROID_UPLOAD_KEY_ALIAS = 'upload'
 $env:ANDROID_UPLOAD_KEYSTORE_PASSWORD = Read-Host -MaskInput 'Upload key password'

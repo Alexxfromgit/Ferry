@@ -51,6 +51,7 @@ jobs:
       contents: write # Draft releases are visible to callers with write access.
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
     steps:
       - id: tag
         env:
@@ -66,6 +67,7 @@ jobs:
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
   verify:
     needs: prepare
@@ -251,6 +253,8 @@ jobs:
     environment: android-release
     permissions:
       contents: read
+    outputs:
+      version-code: ${{ steps.version-code.outputs.code }}
     env:
       CARGO_TERM_COLOR: always
       TAG: ${{ needs.prepare.outputs.tag }}
@@ -274,6 +278,12 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
       - run: npm --prefix app ci
+      # One more than the highest build either channel has released; both builds use it.
+      - name: Pick the build number
+        id: version-code
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: node scripts/android-version-code.mjs
       - name: Write the signing keys
         env:
           DIRECT_KEYSTORE: ${{ secrets.ANDROID_DIRECT_KEYSTORE_B64 }}
@@ -288,6 +298,7 @@ jobs:
       - name: Build the Direct APK
         env:
           ORG_GRADLE_PROJECT_ferryDist: direct
+          ORG_GRADLE_PROJECT_ferryVersionCode: ${{ steps.version-code.outputs.code }}
           ANDROID_DIRECT_KEYSTORE: ${{ runner.temp }}/direct.p12
           ANDROID_DIRECT_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_DIRECT_KEYSTORE_PASSWORD }}
           ANDROID_DIRECT_KEY_ALIAS: ${{ vars.ANDROID_DIRECT_KEY_ALIAS || 'ferry-direct' }}
@@ -300,10 +311,12 @@ jobs:
           apk="android-direct/Ferry-${TAG#v}-android.apk"
           mkdir -p android-direct
           mv app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk "$apk"
-          node scripts/android-release.mjs verify "$apk" --tag "$TAG" --cert "$FERRY_DIRECT_CERT_SHA256"
+          node scripts/android-release.mjs verify "$apk" --tag "$TAG" \
+            --version-code "$ORG_GRADLE_PROJECT_ferryVersionCode" --cert "$FERRY_DIRECT_CERT_SHA256"
       - name: Build the Play bundle
         env:
           ORG_GRADLE_PROJECT_ferryDist: play
+          ORG_GRADLE_PROJECT_ferryVersionCode: ${{ steps.version-code.outputs.code }}
           ANDROID_UPLOAD_KEYSTORE: ${{ runner.temp }}/upload.p12
           ANDROID_UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
           ANDROID_UPLOAD_KEY_ALIAS: ${{ vars.ANDROID_UPLOAD_KEY_ALIAS || 'upload' }}
@@ -364,6 +377,7 @@ jobs:
       AWS_REQUEST_CHECKSUM_CALCULATION: when_required
       AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
       FERRY_DIRECT_CERT_SHA256: ${{ vars.FERRY_DIRECT_CERT_SHA256 }}
+      VERSION_CODE: ${{ needs.build-android.outputs.version-code }}
     steps:
       - name: Check the R2 configuration
         run: |
@@ -397,7 +411,7 @@ jobs:
             fi
             rm -f "$live"
           fi
-          node scripts/android-release.mjs prepare android-direct/*.apk --tag "$TAG" \
+          node scripts/android-release.mjs prepare android-direct/*.apk --tag "$TAG" --version-code "$VERSION_CODE" \
             --cert "$FERRY_DIRECT_CERT_SHA256" --repo "$GITHUB_REPOSITORY" --out "$RUNNER_TEMP/r2" --current "$live"
       - uses: actions/attest@v4
         if: steps.feed.outputs.publish == 'true'
@@ -450,7 +464,8 @@ jobs:
           serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: com.xenvaultinteractive.ferry
           releaseFiles: android-play/*.aab
-          releaseName: ${{ needs.prepare.outputs.tag }}
+          # Shown in Play Console as, for example, "0.3.0 (4)".
+          releaseName: ${{ format('{0} ({1})', needs.prepare.outputs.version, needs.build-android.outputs.version-code) }}
           track: internal
           # Google Play only takes draft releases until the app's first review has passed.
           status: ${{ vars.PLAY_RELEASE_STATUS || 'draft' }}
