@@ -15,7 +15,7 @@ import {
   parseVersionCode,
   versionOfTag,
 } from "./android-release.mjs";
-import { nextVersionCode } from "./android-version-code.mjs";
+import { PLAY_BUILD_FLOOR, nextVersionCode, versionCodeFloor } from "./android-version-code.mjs";
 
 test("build numbers and tags are validated", () => {
   assert.equal(parseVersionCode("1"), 1);
@@ -37,6 +37,20 @@ test("build numbers count up from 1 across both channels", () => {
   // ...but an old upload far ahead doesn't hold numbering back.
   assert.equal(nextVersionCode({ released: [], uploaded: [2000] }), 1);
   assert.equal(nextVersionCode({ released: [1999], uploaded: [2000] }), 2001);
+});
+
+test("build numbers never fall below what Google Play may have", () => {
+  // Without Google Play's history and with an empty Direct feed, numbering still clears the
+  // first, manual Play upload.
+  assert.equal(nextVersionCode({ floor: versionCodeFloor(undefined) }), PLAY_BUILD_FLOOR + 1);
+  assert.equal(nextVersionCode({ released: [2005], floor: PLAY_BUILD_FLOOR }), 2006);
+  assert.equal(nextVersionCode({ released: [2005], floor: versionCodeFloor("2010") }), 2011);
+  assert.equal(nextVersionCode({ released: [], uploaded: [2001], floor: 2000 }), 2002);
+  // A lower configured floor never goes below the known one.
+  assert.equal(versionCodeFloor("5"), PLAY_BUILD_FLOOR);
+  assert.equal(versionCodeFloor(" "), PLAY_BUILD_FLOOR);
+  assert.throws(() => versionCodeFloor("20x"));
+  assert.throws(() => versionCodeFloor("0"));
 });
 
 test("certificate digests accept keytool and apksigner spellings", () => {
