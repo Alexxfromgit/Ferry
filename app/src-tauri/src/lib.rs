@@ -1,9 +1,9 @@
 //! Ferry desktop shell: a thin Tauri layer over `ferry-core`.
 //!
 //! Commands map 1:1 to `Node` methods; core events are forwarded to the webview as
-//! `ferry-event`. Incoming links (`ferry://` deep links, `.ferry` files opened from the file
-//! manager, or a second app launch) are queued and announced with `ferry-open-link`. When the
-//! UI may have missed events, `ferry-resync` tells it to reload its lists.
+//! `ferry-event`. Incoming links (`ferry://` or web deep links, `.ferry` files opened from the
+//! file manager, or a second app launch) are queued and announced with `ferry-open-link`. When
+//! the UI may have missed events, `ferry-resync` tells it to reload its lists.
 
 #[cfg(desktop)]
 mod updates;
@@ -18,10 +18,10 @@ use ferry_core::{
     SHARE_FILE_EXTENSION, ShareInfo, ShareLink, TicketFile, TicketPassword,
 };
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent, path::BaseDirectory};
+#[cfg(desktop)]
 use tauri::{
-    AppHandle, Emitter, Manager, RunEvent, State, WindowEvent,
     menu::{Menu, MenuItem},
-    path::BaseDirectory,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -322,12 +322,6 @@ fn take_pending_links(state: State<'_, AppState>) -> Vec<IncomingShare> {
 
 // ------------------------------------------------------------- integration
 
-fn is_ferry_url(arg: &str) -> bool {
-    arg.trim()
-        .get(..8)
-        .is_some_and(|p| p.eq_ignore_ascii_case("ferry://"))
-}
-
 fn has_ticket_extension(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case(SHARE_FILE_EXTENSION))
@@ -335,7 +329,7 @@ fn has_ticket_extension(path: &Path) -> bool {
 
 /// Recognize incoming links and paths without opening files on the event thread.
 fn link_from_arg(arg: &str) -> Option<IncomingShare> {
-    if is_ferry_url(arg) {
+    if ferry_core::is_share_url(arg) {
         return Some(IncomingShare::Link {
             link: arg.trim().to_string(),
         });
@@ -358,7 +352,10 @@ fn accept_links(app: &AppHandle, args: impl IntoIterator<Item = String>) {
     show_main(app);
 }
 
+#[cfg_attr(mobile, allow(unused_variables))]
 fn show_main(app: &AppHandle) {
+    // Mobile apps have a single window the OS brings forward.
+    #[cfg(desktop)]
     if let Some(window) = app.get_webview_window("main") {
         window.show().ok();
         window.unminimize().ok();
@@ -394,6 +391,7 @@ fn forward_events(app: AppHandle, node: &Node) {
     });
 }
 
+#[cfg(desktop)]
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open Ferry", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Ferry", true, None::<&str>)?;
@@ -468,8 +466,92 @@ fn node_dir(app: &tauri::App) -> tauri::Result<PathBuf> {
     Ok(local)
 }
 
+/// The identifier Ferry 0.2 and earlier used. It names the app's folders.
+#[cfg(desktop)]
+const LEGACY_IDENTIFIER: &str = "dev.ferry.desktop";
+
+/// Move what the folders named after [`LEGACY_IDENTIFIER`] hold into the current ones. Tauri
+/// has already created the new folders (for webview data) by the time `setup` runs, so this
+/// moves entries one by one and leaves any whose name is already taken. Returns warnings to
+/// log once logging is up.
+#[cfg(desktop)]
+fn migrate_legacy_dirs(app: &tauri::App) -> Vec<String> {
+    let identifier = app.config().identifier.as_str();
+    let path = app.path();
+    let mut moved = Vec::new();
+    let mut warnings = Vec::new();
+    for new in [
+        path.app_data_dir(),
+        path.app_local_data_dir(),
+        path.app_config_dir(),
+        path.app_cache_dir(),
+        path.app_log_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let Some(old) = legacy_dir(&new, identifier) else {
+            continue;
+        };
+        if moved.contains(&old) || !old.is_dir() {
+            continue;
+        }
+        if let Err(e) = move_entries(&old, &new) {
+            warnings.push(format!(
+                "could not move {} to {}: {e}",
+                old.display(),
+                new.display()
+            ));
+        }
+        moved.push(old);
+    }
+    warnings
+}
+
+/// `dir` with the path component equal to `identifier` replaced by the legacy one.
+#[cfg(desktop)]
+fn legacy_dir(dir: &Path, identifier: &str) -> Option<PathBuf> {
+    if identifier == LEGACY_IDENTIFIER {
+        return None;
+    }
+    let mut found = false;
+    let old = dir
+        .components()
+        .map(|part| {
+            if part.as_os_str() == identifier {
+                found = true;
+                std::ffi::OsStr::new(LEGACY_IDENTIFIER)
+            } else {
+                part.as_os_str()
+            }
+        })
+        .collect();
+    found.then_some(old)
+}
+
+#[cfg(desktop)]
+fn move_entries(old: &Path, new: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(new)?;
+    for entry in std::fs::read_dir(old)? {
+        let entry = entry?;
+        let target = new.join(entry.file_name());
+        if !target.exists() {
+            std::fs::rename(entry.path(), target)?;
+        }
+    }
+    // Only succeeds once nothing is left behind.
+    std::fs::remove_dir(old).ok();
+    Ok(())
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(desktop)]
+    let migration_warnings = migrate_legacy_dirs(app);
     init_logging(&app.path().app_log_dir()?);
+    #[cfg(desktop)]
+    for warning in migration_warnings {
+        tracing::warn!("{warning}");
+    }
     let config_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&config_dir)?;
     let settings_path = config_dir.join("settings.json");
@@ -520,6 +602,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         pending_links: Mutex::new(Vec::new()),
     });
 
+    #[cfg(desktop)]
     build_tray(app)?;
 
     // Register ferry:// for this executable (installers do this too; needed for dev builds
@@ -539,13 +622,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // Launched by opening a .ferry file (Windows/Linux pass it as an argument).
     accept_links(
         app.handle(),
-        std::env::args().skip(1).filter(|a| !is_ferry_url(a)),
+        std::env::args()
+            .skip(1)
+            .filter(|a| !ferry_core::is_share_url(a)),
     );
     Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg_attr(mobile, allow(unused_mut))]
     let mut builder = tauri::Builder::default();
     // Must be the first plugin: a second launch hands its arguments to the running instance
     // and exits. ferry:// links are forwarded to the deep-link plugin (on_open_url), so only
@@ -553,7 +639,12 @@ pub fn run() {
     #[cfg(desktop)]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            accept_links(app, argv.into_iter().skip(1).filter(|a| !is_ferry_url(a)));
+            accept_links(
+                app,
+                argv.into_iter()
+                    .skip(1)
+                    .filter(|a| !ferry_core::is_share_url(a)),
+            );
             show_main(app);
         }));
         builder = builder
@@ -648,6 +739,13 @@ mod tests {
                 link: "FERRY://get?t=abc".into()
             })
         );
+        assert_eq!(
+            link_from_arg("https://ferry.xenvaultinteractive.com/get#abc"),
+            Some(IncomingShare::Link {
+                link: "https://ferry.xenvaultinteractive.com/get#abc".into()
+            })
+        );
+        assert!(link_from_arg("https://example.com/get#abc").is_none());
         assert!(link_from_arg("--flag").is_none());
         let dir = tempfile_dir();
         let file = dir.join("x.ferry");
@@ -713,6 +811,47 @@ mod tests {
         assert!(!settings.close_to_tray);
         assert!(settings.show_artwork);
         assert!(settings.auto_check_updates);
+    }
+
+    #[test]
+    fn legacy_dirs_swap_only_the_identifier() {
+        let id = "com.xenvaultinteractive.ferry";
+        let new = Path::new("data").join(id).join("logs");
+        assert_eq!(
+            legacy_dir(&new, id),
+            Some(Path::new("data").join(LEGACY_IDENTIFIER).join("logs"))
+        );
+        assert_eq!(legacy_dir(Path::new("data/other"), id), None);
+        assert_eq!(
+            legacy_dir(&Path::new("x").join(LEGACY_IDENTIFIER), LEGACY_IDENTIFIER),
+            None
+        );
+    }
+
+    #[test]
+    fn legacy_entries_move_without_overwriting() {
+        let dir = tempfile_dir().join("migrate");
+        let (old, new) = (dir.join("old"), dir.join("new"));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(old.join("node")).unwrap();
+        std::fs::write(old.join("settings.json"), "old").unwrap();
+        std::fs::write(old.join("node").join("key"), "k").unwrap();
+        std::fs::create_dir_all(new.join("EBWebView")).unwrap();
+        std::fs::create_dir_all(old.join("EBWebView")).unwrap();
+
+        move_entries(&old, &new).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(new.join("settings.json")).unwrap(),
+            "old"
+        );
+        assert!(new.join("node").join("key").is_file());
+        // A name already taken stays behind, so the old folder does too.
+        assert!(old.join("EBWebView").is_dir());
+
+        std::fs::remove_dir(old.join("EBWebView")).unwrap();
+        move_entries(&old, &new).unwrap();
+        assert!(!old.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn tempfile_dir() -> PathBuf {

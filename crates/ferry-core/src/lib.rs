@@ -20,6 +20,7 @@ pub use config::{Config, RelayChoice, validate_relay_url};
 pub use events::{ConnectionKind, Event, ReceiverProgress};
 pub use link::{
     FileEntry, LINK_SCHEME, MAX_FILES_IN_SHARE_FILE, SHARE_FILE_EXTENSION, ShareFile, ShareLink,
+    WEB_LINK_HOST, is_share_url,
 };
 pub use node::{Node, NodeStatus, PREVIEW_FILES, Preview};
 pub use registry::{DownloadInfo, DownloadStatus, ShareInfo, SkipReason, SkippedItem};

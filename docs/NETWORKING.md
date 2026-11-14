@@ -8,9 +8,11 @@ relay server does, and what to expect on difficult networks.
 
 - Every Ferry install has a permanent **device ID**: a public key, created on first start and
   stored in the app's data folder.
-- A share link (`ferry://get?t=…`), a `.ferry` ticket file and the QR code all carry the same
-  **ticket**: the sender's device ID, their last known addresses, and the BLAKE3 hash of the
-  shared files.
+- A share link (`https://ferry.xenvaultinteractive.com/get#…`), a `.ferry` ticket file and the QR
+  code all carry the same **ticket**: the sender's device ID, their last known addresses, and the
+  BLAKE3 hash of the shared files. The ticket sits after the `#`, which browsers never send to
+  the web server; the page there only hands the link to Ferry (`ferry://get?t=…`) or offers to
+  install it.
 - The recipient's Ferry connects to the sender's **device ID** using the addresses available.
   It can use hole punching through home routers or an **encrypted relay** when needed.
 - Every byte is verified against the BLAKE3 hash while it arrives. Interrupted downloads resume
@@ -102,11 +104,12 @@ use `https://that-name` in Ferry. Use an `iroh-relay` version matching the iroh 
 
 | What | Where (Windows; macOS and Linux use the platform equivalents) |
 | --- | --- |
-| Device identity, shares, partial downloads | `%LOCALAPPDATA%\dev.ferry.desktop\node\` |
-| Settings | `%APPDATA%\dev.ferry.desktop\settings.json` |
-| Log (one previous log kept as `ferry.log.1`) | `%LOCALAPPDATA%\dev.ferry.desktop\logs\ferry.log` |
+| Device identity, shares, partial downloads | `%LOCALAPPDATA%\com.xenvaultinteractive.ferry\node\` |
+| Settings | `%APPDATA%\com.xenvaultinteractive.ferry\settings.json` |
+| Log (one previous log kept as `ferry.log.1`) | `%LOCALAPPDATA%\com.xenvaultinteractive.ferry\logs\ferry.log` |
 
 The node folder is in the local (not roaming) profile because partial downloads can be large.
-Earlier versions kept it under `%APPDATA%`; Ferry moves it on first start.
+Earlier versions kept it under `%APPDATA%`, and versions up to 0.2 used folders named
+`dev.ferry.desktop`; Ferry moves both on first start.
 
 Deleting `node\secret.key` gives the device a new ID and **breaks every link you have sent**.
