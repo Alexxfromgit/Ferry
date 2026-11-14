@@ -48,9 +48,11 @@ key. Tauri updater signing is independent of OS code signing.
 
 To ship the initial version from the current source or retry a draft, create or verify
 a `vX.Y.Z` tag that matches the version in the source. Create a draft GitHub release for
-that existing tag. From **Actions → Release → Run workflow**, select the tag in the
-ref selector. This builds and publishes the draft after the checks pass. The same tag
-can be dispatched again if a build fails while the release is still a draft.
+that existing tag. From **Actions → Release → Run workflow**, keep `main` in the ref
+selector and enter the tag in the **tag** field, or run
+`gh workflow run release.yml --ref main -f tag=vX.Y.Z`. The workflow from `main` builds
+the tagged source and publishes the draft after the checks pass. Run it again with the
+same tag if a build fails while the release is still a draft.
 
 For local packaging, run `./build.sh --bundle` or `./build.ps1 -Bundle`.
 Use the [macOS smoke test](../CONTRIBUTING.md#macos-smoke-test) to check file
