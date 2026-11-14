@@ -4,7 +4,13 @@
 //! that copy, which is served in place and deleted when the share is removed.
 //!
 //! Shares keep the phone reachable: while any is on, the transfer notification (and its
-//! foreground service) stays up with a "Stop sharing" button; see `android.rs`.
+//! foreground service) stays up with a "Stop sharing" button; see `android.rs`. So does
+//! getting a share ready, from the first copied byte to the last hashed one.
+//!
+//! Sharing the same files again gives the same share (its id is the content's hash), and both
+//! copies end up in use: the blob store reads from the first one it was given, the share lists
+//! the newest. So a share can have several copies; the newer ones are hard links to the first
+//! where possible, so they take no extra space, and all of them go with the share.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -15,12 +21,12 @@ use std::{
     },
 };
 
-use ferry_core::ShareInfo;
+use ferry_core::{FileEntry, ShareInfo};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_ferry_mobile::{FerryMobileExt, MobileEvent};
 
-use crate::{AppState, CmdResult, fail};
+use crate::{AppState, CmdResult, android, fail};
 
 /// Files shared to Ferry from another app are waiting (payload: none; see `take_incoming`).
 const INCOMING_EVENT: &str = "ferry-incoming";
@@ -44,12 +50,40 @@ pub enum PickKind {
     Folder,
 }
 
+/// The folders (under `<app data>/outgoing`) holding one share's copies, oldest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "StoredDirs", into = "Vec<String>")]
+struct Dirs(Vec<String>);
+
+/// `outgoing.json` once held a single folder per share.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredDirs {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl From<StoredDirs> for Dirs {
+    fn from(stored: StoredDirs) -> Self {
+        match stored {
+            StoredDirs::One(dir) => Self(vec![dir]),
+            StoredDirs::Many(dirs) => Self(dirs),
+        }
+    }
+}
+
+impl From<Dirs> for Vec<String> {
+    fn from(dirs: Dirs) -> Self {
+        dirs.0
+    }
+}
+
 /// The copies behind each share, and files shared to Ferry that the UI hasn't taken yet.
 pub struct Outgoing {
-    /// `outgoing.json`: share id → folder name under `dir`.
+    /// `outgoing.json`: share id → folder names under `dir`.
     path: PathBuf,
     dir: PathBuf,
-    copies: Mutex<BTreeMap<String, String>>,
+    copies: Mutex<BTreeMap<String, Dirs>>,
     incoming: Mutex<Vec<Vec<String>>>,
     next: AtomicU64,
 }
@@ -70,7 +104,7 @@ impl Outgoing {
         }
     }
 
-    fn save(&self, copies: &BTreeMap<String, String>) {
+    fn save(&self, copies: &BTreeMap<String, Dirs>) {
         let json = serde_json::to_vec_pretty(copies).expect("outgoing copies serialize");
         if let Err(e) = ferry_core::write_atomic(&self.path, &json) {
             tracing::warn!("could not record shared copies: {e}");
@@ -88,37 +122,69 @@ impl Outgoing {
         Ok((name, dir))
     }
 
-    /// Remember that `share_id` serves the copies in `name`. If the same files were already
-    /// shared (same id), the earlier copies keep serving and these are deleted.
-    fn record(&self, share_id: &str, name: String) {
+    /// Remember that `share` serves the copies in `name`. When the same files were shared
+    /// before, the earlier copies stay too (see the module docs); `files` (the share's files)
+    /// are then hard-linked to them so the new copy takes no extra space.
+    fn record(&self, share: &ShareInfo, name: String, files: &[FileEntry]) {
         let mut copies = self.copies.lock().unwrap();
-        if copies.contains_key(share_id) {
-            remove_dir(&self.dir.join(name));
+        let dirs = copies.entry(share.id.clone()).or_default();
+        if dirs.0.contains(&name) {
             return;
         }
-        copies.insert(share_id.to_owned(), name);
+        if let Some(first) = dirs.0.first() {
+            link_duplicates(&self.dir.join(first), &self.dir.join(&name), files);
+        }
+        dirs.0.push(name);
         self.save(&copies);
     }
 
     /// Delete the copies behind a removed share.
     pub fn forget(&self, share_id: &str) {
         let mut copies = self.copies.lock().unwrap();
-        if let Some(name) = copies.remove(share_id) {
+        if let Some(dirs) = copies.remove(share_id) {
             self.save(&copies);
-            remove_dir(&self.dir.join(name));
+            for name in dirs.0 {
+                remove_dir(&self.dir.join(name));
+            }
         }
     }
 
+    /// The folder under `dir` that `path` is in, if any. Shares keep their paths canonical
+    /// (on many phones `/data/user/0` is a link to `/data/data`), so both spellings count.
+    fn dir_of(&self, path: &Path, canonical_dir: Option<&Path>) -> Option<String> {
+        let below = path
+            .strip_prefix(&self.dir)
+            .ok()
+            .or_else(|| path.strip_prefix(canonical_dir?).ok())?;
+        let first = below.components().next()?;
+        Some(first.as_os_str().to_string_lossy().into_owned())
+    }
+
     /// Delete copies no share uses: left over from a share removed while Ferry was closing,
-    /// or from a copy interrupted part way.
-    fn tidy(&self, live: &HashSet<String>) {
+    /// or from a copy interrupted part way. A live share's own folders always stay, even if
+    /// Ferry closed before recording them.
+    fn tidy(&self, live: &[ShareInfo]) {
         let mut copies = self.copies.lock().unwrap();
-        let before = copies.len();
-        copies.retain(|id, _| live.contains(id));
-        if copies.len() != before {
+        let before = copies.clone();
+        copies.retain(|id, _| live.iter().any(|s| &s.id == id));
+        let canonical_dir = std::fs::canonicalize(&self.dir).ok();
+        for share in live {
+            let own = share
+                .source_paths
+                .iter()
+                .filter_map(|p| self.dir_of(p, canonical_dir.as_deref()));
+            for dir in own {
+                let dirs = copies.entry(share.id.clone()).or_default();
+                if !dirs.0.contains(&dir) {
+                    dirs.0.push(dir);
+                }
+            }
+        }
+        copies.retain(|_, dirs| !dirs.0.is_empty());
+        if *copies != before {
             self.save(&copies);
         }
-        let used: HashSet<&String> = copies.values().collect();
+        let used: HashSet<&String> = copies.values().flat_map(|dirs| &dirs.0).collect();
         if let Ok(entries) = std::fs::read_dir(&self.dir) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -126,6 +192,44 @@ impl Outgoing {
                     remove_dir(&entry.path());
                 }
             }
+        }
+    }
+}
+
+/// `dir` joined with a share's `/`-separated file name, refusing anything but plain names.
+fn join_name(dir: &Path, name: &str) -> Option<PathBuf> {
+    let mut path = dir.to_path_buf();
+    for part in name.split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.contains('\\') {
+            return None;
+        }
+        path.push(part);
+    }
+    Some(path)
+}
+
+/// Make each of `files` in `copy` a hard link to the same file in `first`, so a second copy of
+/// the same share takes no extra space. Files that can't be linked stay as they are.
+fn link_duplicates(first: &Path, copy: &Path, files: &[FileEntry]) {
+    for file in files {
+        let (Some(original), Some(duplicate)) =
+            (join_name(first, &file.name), join_name(copy, &file.name))
+        else {
+            continue;
+        };
+        let same_size = |path: &Path| {
+            std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() == file.size)
+        };
+        if !(same_size(&original) && same_size(&duplicate)) {
+            continue;
+        }
+        let link = duplicate.with_file_name(".ferry-link");
+        std::fs::remove_file(&link).ok();
+        let linked =
+            std::fs::hard_link(&original, &link).and_then(|()| std::fs::rename(&link, &duplicate));
+        if let Err(e) = linked {
+            std::fs::remove_file(&link).ok();
+            tracing::debug!("kept a second copy of {}: {e}", file.name);
         }
     }
 }
@@ -142,14 +246,7 @@ fn remove_dir(dir: &Path) {
 /// Stop button, Android's time limit, copy progress).
 pub fn start(app: &AppHandle, data_dir: &Path) {
     let outgoing = Outgoing::load(data_dir);
-    let live = app
-        .state::<AppState>()
-        .node
-        .list_shares()
-        .into_iter()
-        .map(|s| s.id)
-        .collect();
-    outgoing.tidy(&live);
+    outgoing.tidy(&app.state::<AppState>().node.list_shares());
     app.manage(outgoing);
 
     let app = app.clone();
@@ -243,11 +340,21 @@ pub async fn share_items(app: AppHandle, uris: Vec<String>) -> CmdResult<ShareIn
     if uris.is_empty() {
         return Err("Nothing to share.".into());
     }
+    // Copying and hashing can take a while: keep Ferry running if the user leaves it. The
+    // service must start now, while Ferry is on screen; Android refuses later.
+    let _preparing = android::Preparing::start(&app);
     let outgoing = app.state::<Outgoing>();
     let (name, dir) = outgoing.new_dir().map_err(fail)?;
     let result = stage_and_share(&app, uris, &dir).await;
     match &result {
-        Ok(share) => outgoing.record(&share.id, name),
+        Ok(share) => {
+            let files = app
+                .state::<AppState>()
+                .node
+                .share_files(&share.id)
+                .unwrap_or_default();
+            outgoing.record(share, name, &files);
+        }
         Err(_) => remove_dir(&dir),
     }
     result

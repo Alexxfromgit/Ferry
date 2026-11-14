@@ -59,15 +59,15 @@ struct CheckArgs {
     allow_immediate: bool,
 }
 
-/// Whether installing now would cut off work: a transfer, or files being copied into
-/// Downloads.
+/// Whether installing now would cut off work: a transfer either way, files being copied into
+/// Downloads, or a share being prepared.
 fn busy(app: &AppHandle, state: &AppState) -> bool {
     state
         .node
         .list_downloads()
         .iter()
         .any(|download| download.status.is_active())
-        || app.try_state::<Phone>().is_some_and(|phone| phone.saving())
+        || app.try_state::<Phone>().is_some_and(|phone| phone.busy())
 }
 
 /// Run an `UpdatePlugin` command on a blocking thread (the call waits for Android's answer).

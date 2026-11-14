@@ -182,7 +182,7 @@ class FerryMobilePlugin(private val activity: Activity) : Plugin(activity) {
         val args = invoke.parseArgs(StageArgs::class.java)
         staging.execute {
             try {
-                val result = Staging(activity.contentResolver).copy(args.uris.map(Uri::parse), File(args.dest)) { done, total ->
+                val result = Staging(activity).copy(args.uris.map(Uri::parse), File(args.dest)) { done, total ->
                     emit(JSObject().put("type", "stageProgress").put("doneBytes", done).put("totalBytes", total))
                 }
                 invoke.resolve(JSObject().put("paths", JSArray(result.paths)).put("skipped", result.skipped))

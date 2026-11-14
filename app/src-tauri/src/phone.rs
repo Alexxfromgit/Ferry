@@ -55,6 +55,17 @@ pub fn saving_text<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<(Stri
     Some((title, "Copying files…".to_owned()))
 }
 
+/// Title and text while `count` shares are being prepared (copied into app storage and
+/// hashed), or `None` when none is.
+pub fn preparing_text(count: usize) -> Option<(String, String)> {
+    let title = match count {
+        0 => return None,
+        1 => "Getting files ready to share".to_owned(),
+        n => format!("Getting {n} shares ready"),
+    };
+    Some((title, "Ferry keeps going if you leave it".to_owned()))
+}
+
 /// A share that is on, as the notification describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sharing {
@@ -245,6 +256,13 @@ mod tests {
         let mut old = one.clone();
         old.export_names = None;
         assert_eq!(saved_items(&old), [PathBuf::from("/data/incoming/Trip")]);
+    }
+
+    #[test]
+    fn notification_describes_preparing_shares() {
+        assert!(preparing_text(0).is_none());
+        assert_eq!(preparing_text(1).unwrap().0, "Getting files ready to share");
+        assert_eq!(preparing_text(2).unwrap().0, "Getting 2 shares ready");
     }
 
     #[test]
