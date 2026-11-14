@@ -1,7 +1,8 @@
 //! The phone side of receiving. Downloads land in app storage first (`<app data>/incoming`);
 //! once one completes, its files are copied into the shared Downloads collection under
-//! `Download/Ferry` and the app's copy is deleted. While anything is transferring, a
-//! foreground service with a progress notification keeps Ferry running with the screen off.
+//! `Download/Ferry` and the app's copy is deleted. While anything is transferring, or any
+//! share is on (see `android_send.rs`), a foreground service with a notification keeps Ferry
+//! running with the screen off.
 
 use std::{
     collections::BTreeMap,
@@ -10,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ferry_core::{DownloadInfo, DownloadStatus, Event};
+use ferry_core::{DownloadInfo, DownloadStatus, Event, ShareInfo};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_ferry_mobile::{FerryMobileExt, SavedFile, TransferStatus};
@@ -46,8 +47,25 @@ pub struct Phone {
 #[derive(Default)]
 struct Transfers {
     active: BTreeMap<String, DownloadInfo>,
+    /// Shares that are on, by id.
+    sharing: BTreeMap<String, phone::Sharing>,
     shown: Option<TransferStatus>,
     shown_at: Option<Instant>,
+}
+
+impl Transfers {
+    /// Track a share's on/off state. True if the set of shares that are on changed.
+    fn track_share(&mut self, share: &ShareInfo) -> bool {
+        if share.paused {
+            return self.sharing.remove(&share.id).is_some();
+        }
+        let fresh = phone::Sharing {
+            name: share.name.clone(),
+            peers: 0,
+            bytes_per_sec: 0,
+        };
+        self.sharing.insert(share.id.clone(), fresh).is_none()
+    }
 }
 
 impl Phone {
@@ -91,6 +109,15 @@ impl Phone {
 pub fn resume(app: &AppHandle) {
     let state = app.state::<AppState>();
     let phone = app.state::<Phone>();
+    // Shares that were on when Ferry last closed are served again: keep the phone reachable.
+    {
+        let mut transfers = phone.transfers.lock().unwrap();
+        let mut changed = false;
+        for share in state.node.list_shares() {
+            changed |= transfers.track_share(&share);
+        }
+        update_notification(app, &mut transfers, changed);
+    }
     for download in state.node.list_downloads() {
         let waiting = download.status == DownloadStatus::Completed
             && phone::saved_items(&download)
@@ -140,12 +167,40 @@ pub fn on_event(app: &AppHandle, event: &Event) {
                 phone.set(app, download_id, None);
             }
         }
+        Event::ShareCreated { share } | Event::ShareUpdated { share } => {
+            let mut transfers = phone.transfers.lock().unwrap();
+            let changed = transfers.track_share(share);
+            update_notification(app, &mut transfers, changed);
+        }
+        Event::ShareRemoved { share_id } => {
+            let mut transfers = phone.transfers.lock().unwrap();
+            let changed = transfers.sharing.remove(share_id).is_some();
+            update_notification(app, &mut transfers, changed);
+        }
+        Event::ShareActivity {
+            share_id,
+            active_peers,
+            bytes_per_sec,
+            ..
+        } => {
+            let mut transfers = phone.transfers.lock().unwrap();
+            let changed = match transfers.sharing.get_mut(share_id) {
+                Some(sharing) => {
+                    let started_or_ended = (sharing.peers == 0) != (*active_peers == 0);
+                    sharing.peers = *active_peers;
+                    sharing.bytes_per_sec = *bytes_per_sec;
+                    started_or_ended
+                }
+                None => false,
+            };
+            update_notification(app, &mut transfers, changed);
+        }
         _ => {}
     }
 }
 
 fn update_notification(app: &AppHandle, transfers: &mut Transfers, changed: bool) {
-    let next = transfer_status(&transfers.active);
+    let next = transfer_status(transfers);
     let due = transfers
         .shown_at
         .is_none_or(|at| at.elapsed() >= NOTIFY_EVERY);
@@ -162,12 +217,23 @@ fn update_notification(app: &AppHandle, transfers: &mut Transfers, changed: bool
     });
 }
 
-/// The notification for these active downloads, or `None` when nothing is transferring.
-fn transfer_status(active: &BTreeMap<String, DownloadInfo>) -> Option<TransferStatus> {
-    phone::transfer_text(active.values()).map(|(title, text, progress)| TransferStatus {
+/// The notification: receiving takes precedence, then shares that are on. `None` when there
+/// is neither, which stops the foreground service.
+fn transfer_status(transfers: &Transfers) -> Option<TransferStatus> {
+    let sharing = !transfers.sharing.is_empty();
+    if let Some((title, text, progress)) = phone::transfer_text(transfers.active.values()) {
+        return Some(TransferStatus {
+            title,
+            text,
+            progress,
+            sharing,
+        });
+    }
+    phone::sharing_text(transfers.sharing.values()).map(|(title, text)| TransferStatus {
         title,
         text,
-        progress,
+        progress: None,
+        sharing: true,
     })
 }
 

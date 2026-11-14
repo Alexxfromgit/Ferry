@@ -7045,8 +7045,10 @@ name = "tauri-plugin-ferry-mobile"
 version = "0.2.0"
 dependencies = [
  "serde",
+ "serde_json",
  "tauri",
  "tauri-plugin",
+ "tracing",
 ]
 
 [[package]]

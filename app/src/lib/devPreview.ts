@@ -163,7 +163,31 @@ export function installDevPreview() {
         case "open_download":
         case "share_download":
         case "retry_save":
+        case "share_link":
           return null;
+        case "take_incoming":
+          return [];
+        case "pick_items":
+          return ["content://com.android.providers.media.documents/document/image%3A1001"];
+        case "share_items":
+          // Copying, then preparing the ticket, then a new share.
+          return new Promise((done) => {
+            const total = 48_000_000;
+            let copied = 0;
+            const copy = setInterval(() => {
+              copied = Math.min(total, copied + 6_000_000);
+              void emit("ferry-staging", { doneBytes: copied, totalBytes: total });
+              if (copied < total) return;
+              clearInterval(copy);
+              void emit("ferry-event", { type: "importProgress", opId: 1, doneBytes: total, totalBytes: total, currentFile: "IMG_2041.jpg" });
+              const share = { ...shares[0], id: hex(32), name: "IMG_2041.jpg", fileCount: 1, totalSize: total, createdAt: Date.now() / 1000, sourcePaths: ["/data/user/0/com.xenvaultinteractive.ferry/outgoing/1/IMG_2041.jpg"], skipped: [], skippedCount: 0, paused: false };
+              shares.unshift(share);
+              setTimeout(() => {
+                void emit("ferry-event", { type: "shareCreated", share });
+                done(share);
+              }, 600);
+            }, 250);
+          });
         case "update_info":
           return { version, support: "unavailable", autoCheck: true, readyVersion: null };
         case "take_pending_links":

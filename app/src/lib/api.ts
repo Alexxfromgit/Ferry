@@ -39,6 +39,11 @@ export const api = {
   openDownload: (id: string) => invoke<void>("open_download", { id }),
   shareDownload: (id: string) => invoke<void>("share_download", { id }),
   retrySave: (id: string) => invoke<void>("retry_save", { id }),
+  // Android only: sending from the phone. Picked files are copied into Ferry and shared.
+  pickItems: (kind: "files" | "folder") => invoke<string[]>("pick_items", { kind }),
+  takeIncoming: () => invoke<string[][]>("take_incoming"),
+  shareItems: (uris: string[]) => invoke<ShareInfo>("share_items", { uris }),
+  shareLink: (id: string) => invoke<void>("share_link", { id }),
   openProjectPage: () => invoke<void>("open_project_page"),
   openThirdPartyNotices: () => invoke<void>("open_third_party_notices"),
 };

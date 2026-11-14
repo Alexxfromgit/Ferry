@@ -19,6 +19,8 @@ interface Importing {
   doneBytes: number;
   totalBytes: number;
   currentFile: string;
+  /** Phones first copy picked files into Ferry; then the ticket is prepared as on desktop. */
+  copying: boolean;
 }
 
 const LAYOUT_KEY = "ferry.sendView";
@@ -110,6 +112,7 @@ function onEvent(event: FerryEvent) {
           doneBytes: event.doneBytes,
           totalBytes: event.totalBytes,
           currentFile: event.currentFile,
+          copying: false,
         };
       }
       break;
@@ -175,13 +178,44 @@ async function takeIncoming() {
 /** Share files; resolves to the new share, or undefined if it didn't happen. */
 export async function share(paths: string[]): Promise<ShareInfo | undefined> {
   if (paths.length === 0) return;
+  return makeShare(() => api.createShare(paths), false);
+}
+
+/** Phones: let the user pick files or a folder, then share them. */
+export async function shareFromPhone(kind: "files" | "folder") {
+  let uris: string[];
+  try {
+    uris = await api.pickItems(kind);
+  } catch (err) {
+    toast(`Couldn't open the file picker: ${message(err)}`, true);
+    return;
+  }
+  if (uris.length > 0) await makeShare(() => api.shareItems(uris), true);
+}
+
+let incoming = Promise.resolve();
+
+/** Phones: share what was sent to Ferry from other apps' Share menus, one batch at a time. */
+function takeSharedFiles() {
+  incoming = incoming.then(async () => {
+    const batches = await api.takeIncoming().catch(() => [] as string[][]);
+    for (const uris of batches) {
+      app.view = "send";
+      // A ticket started from Ferry's own pickers finishes first.
+      while (app.importing) await new Promise((resolve) => setTimeout(resolve, 300));
+      await makeShare(() => api.shareItems(uris), true);
+    }
+  });
+}
+
+async function makeShare(create: () => Promise<ShareInfo>, copying: boolean): Promise<ShareInfo | undefined> {
   if (app.importing) {
     toast("Ferry is still preparing the previous ticket. Try again when it's done.", true);
     return;
   }
-  app.importing = { doneBytes: 0, totalBytes: 0, currentFile: "" };
+  app.importing = { doneBytes: 0, totalBytes: 0, currentFile: "", copying };
   try {
-    const created = await api.createShare(paths);
+    const created = await create();
     const left = created.skippedCount ?? 0;
     toast(
       left > 0
@@ -316,7 +350,7 @@ async function loadSaved() {
   }
 }
 
-/** Phones receive only for now, so they open on Receive and have no Send tab. */
+/** Phones open on Receive (scanning a code is the common case) and can't drop files. */
 export function isMobile(): boolean {
   return app.info?.mobile ?? false;
 }
@@ -327,6 +361,11 @@ async function initRest() {
   if (app.info.platform === "android") {
     await listen("ferry-saved", () => void loadSaved());
     await loadSaved();
+    await listen<{ doneBytes: number; totalBytes: number }>("ferry-staging", (e) => {
+      if (app.importing?.copying) app.importing = { ...app.importing, ...e.payload };
+    });
+    await listen<string>("ferry-notice", (e) => toast(e.payload));
+    await listen("ferry-incoming", () => takeSharedFiles());
   }
   await listen<FerryEvent>("ferry-event", (e) => onEvent(e.payload));
   await listen("ferry-open-link", () => void takeIncoming());
@@ -355,4 +394,6 @@ async function initRest() {
   await refreshStatus();
   setInterval(refreshStatus, 4000);
   await takeIncoming();
+  // Files shared to Ferry before the UI was listening (Ferry was opened from a Share menu).
+  if (app.info.platform === "android") takeSharedFiles();
 }

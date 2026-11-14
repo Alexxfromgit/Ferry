@@ -37,13 +37,11 @@
     return "ambient";
   });
 
-  const allTabs: { id: View; label: string }[] = [
+  const tabs: { id: View; label: string }[] = [
     { id: "send", label: "Send" },
     { id: "receive", label: "Receive" },
     { id: "settings", label: "Settings" },
   ];
-  // Phones receive only for now.
-  const tabs = $derived(isMobile() ? allTabs.filter((tab) => tab.id !== "send") : allTabs);
 
   /** What each tab's badge counts, with the words for its tooltip and screen readers. */
   const badges = $derived<Record<View, { n: number; one: string; many: string }>>({

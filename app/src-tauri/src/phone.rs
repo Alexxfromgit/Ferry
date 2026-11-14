@@ -40,6 +40,40 @@ pub fn transfer_text<'a>(
     Some((title, text, progress))
 }
 
+/// A share that is on, as the notification describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sharing {
+    pub name: String,
+    /// Devices downloading right now.
+    pub peers: usize,
+    pub bytes_per_sec: u64,
+}
+
+/// Title and text for the notification while shares are on and nothing is being received.
+pub fn sharing_text<'a>(shares: impl IntoIterator<Item = &'a Sharing>) -> Option<(String, String)> {
+    let shares: Vec<_> = shares.into_iter().collect();
+    let title = match shares.as_slice() {
+        [] => return None,
+        [one] => format!("Sharing {}", one.name),
+        many => format!("Sharing {} items", many.len()),
+    };
+    let peers: usize = shares.iter().map(|s| s.peers).sum();
+    let speed: u64 = shares.iter().map(|s| s.bytes_per_sec).sum();
+    // The speed appears once it is measured, a moment after a download starts.
+    let rate = if speed > 0 {
+        format!(" · {}/s", bytes(speed))
+    } else {
+        String::new()
+    };
+    let text = match peers {
+        0 if shares.len() == 1 => "Waiting for someone to open the link".to_owned(),
+        0 => "Waiting for someone to open a link".to_owned(),
+        1 => format!("Sending to 1 device{rate}"),
+        n => format!("Sending to {n} devices{rate}"),
+    };
+    Some((title, text))
+}
+
 fn name_of(download: &DownloadInfo) -> &str {
     if download.name.is_empty() {
         "files"
@@ -185,6 +219,40 @@ mod tests {
         let mut old = one.clone();
         old.export_names = None;
         assert_eq!(saved_items(&old), [PathBuf::from("/data/incoming/Trip")]);
+    }
+
+    #[test]
+    fn notification_describes_shares() {
+        let share = |name: &str, peers, bytes_per_sec| Sharing {
+            name: name.to_owned(),
+            peers,
+            bytes_per_sec,
+        };
+        assert!(sharing_text([]).is_none());
+        let waiting = share("Holiday", 0, 0);
+        assert_eq!(
+            sharing_text([&waiting]),
+            Some((
+                "Sharing Holiday".into(),
+                "Waiting for someone to open the link".into()
+            ))
+        );
+        let sending = share("Report.pdf", 1, 3_145_728);
+        assert_eq!(
+            sharing_text([&waiting, &sending]),
+            Some((
+                "Sharing 2 items".into(),
+                "Sending to 1 device · 3.0 MB/s".into()
+            ))
+        );
+        let busy = share("Clips", 2, 1024);
+        assert_eq!(
+            sharing_text([&busy]).unwrap().1,
+            "Sending to 2 devices · 1.0 KB/s"
+        );
+        // Before the first speed is measured.
+        let starting = share("Clips", 1, 0);
+        assert_eq!(sharing_text([&starting]).unwrap().1, "Sending to 1 device");
     }
 
     #[test]

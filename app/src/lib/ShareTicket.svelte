@@ -2,9 +2,9 @@
   import { save } from "@tauri-apps/plugin-dialog";
   import { api, message } from "./api";
   import { bytes, duration, plural, shortId, shortPath } from "./format";
-  import { copyLink, removeShare, setSharing, shareAgain, statusLine } from "./shareActions";
+  import { copyLink, removeShare, sendLink, setSharing, shareAgain, statusLine } from "./shareActions";
   import ShareSwitch from "./ShareSwitch.svelte";
-  import { app, toast } from "./store.svelte";
+  import { app, isMobile, toast } from "./store.svelte";
   import type { ReceiverProgress, ShareActivity, ShareInfo, SkipReason } from "./types";
 
   let { share, activity }: { share: ShareInfo; activity?: ShareActivity } = $props();
@@ -22,10 +22,11 @@
     api.shareQr(id).then((svg) => (qr = svg)).catch(() => (qr = null));
   });
 
-  // Show the folder the files are served from; the full path is in the tooltip.
-  const fullSource = $derived(share.sourcePaths.join("\n"));
+  // Show the folder the files are served from; the full path is in the tooltip. Phones serve
+  // Ferry's own copy, whose path means nothing to the user.
+  const fullSource = $derived(isMobile() ? "" : share.sourcePaths.join("\n"));
   const source = $derived(
-    share.sourcePaths.length === 1
+    isMobile() ? "This phone" : share.sourcePaths.length === 1
       ? shortPath(share.sourcePaths[0].replace(/[\\/][^\\/]*$/, "") || share.sourcePaths[0], 34)
       : `${share.sourcePaths.length} places`,
   );
@@ -255,11 +256,17 @@
         {/if}
 
         <div class="actions">
-          <button class="t-main" onclick={() => copyLink(share)}>Copy link</button>
-          <button class="t-line" onclick={() => void saveFile()} disabled={saving}>Save ticket file</button>
-          <button class="t-line" onclick={() => passwordDialog?.showModal()} disabled={saving}>
-            Save with password
-          </button>
+          {#if isMobile()}
+            <!-- Phones pass the link on through the share sheet; ticket files are a desktop thing. -->
+            <button class="t-main" onclick={() => sendLink(share)}>Share link</button>
+            <button class="t-line" onclick={() => copyLink(share)}>Copy link</button>
+          {:else}
+            <button class="t-main" onclick={() => copyLink(share)}>Copy link</button>
+            <button class="t-line" onclick={() => void saveFile()} disabled={saving}>Save ticket file</button>
+            <button class="t-line" onclick={() => passwordDialog?.showModal()} disabled={saving}>
+              Save with password
+            </button>
+          {/if}
           <span class="end">
             <ShareSwitch on={!paused} label="Sharing {share.name}" onchange={(on) => setSharing(share, on)} />
             <button class="t-text" onclick={() => removeShare(share)}>Remove</button>

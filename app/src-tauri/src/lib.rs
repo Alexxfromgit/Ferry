@@ -8,6 +8,8 @@
 #[cfg(target_os = "android")]
 mod android;
 #[cfg(target_os = "android")]
+mod android_send;
+#[cfg(target_os = "android")]
 mod android_updates;
 mod phone;
 #[cfg(desktop)]
@@ -154,9 +156,17 @@ async fn set_share_paused(
 }
 
 #[tauri::command]
-async fn remove_share(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+async fn remove_share(
+    #[cfg_attr(not(target_os = "android"), allow(unused_variables))] app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> CmdResult<()> {
     let node = state.node.clone();
-    node.remove_share(&id).await.map_err(fail)
+    node.remove_share(&id).await.map_err(fail)?;
+    // Phones share copies of the picked files; they go with the share.
+    #[cfg(target_os = "android")]
+    app.state::<android_send::Outgoing>().forget(&id);
+    Ok(())
 }
 
 /// Write a `.ferry` file. The extension is always `.ferry`, whatever the path says.
@@ -686,6 +696,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     {
         app.manage(android::Phone::load(config_dir.join("saved.json")));
         android::resume(app.handle());
+        android_send::start(app.handle(), &app.path().app_local_data_dir()?);
     }
 
     #[cfg(desktop)]
@@ -809,6 +820,14 @@ pub fn run() {
             android::share_download,
             #[cfg(target_os = "android")]
             android::retry_save,
+            #[cfg(target_os = "android")]
+            android_send::pick_items,
+            #[cfg(target_os = "android")]
+            android_send::take_incoming,
+            #[cfg(target_os = "android")]
+            android_send::share_items,
+            #[cfg(target_os = "android")]
+            android_send::share_link,
             open_project_page,
             open_third_party_notices,
         ])

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
-  import { app, setShareLayout, share } from "./store.svelte";
+  import { app, isMobile, setShareLayout, share, shareFromPhone } from "./store.svelte";
   import { bytes, exactCount } from "./format";
   import ShareStrip from "./ShareStrip.svelte";
   import ShareTicket from "./ShareTicket.svelte";
@@ -33,6 +33,8 @@
   }
 
   async function pick(directory: boolean) {
+    // Phones pick through Android's own pickers; Ferry copies what is picked, then shares it.
+    if (isMobile()) return shareFromPhone(directory ? "folder" : "files");
     const picked = await open({ multiple: true, directory });
     if (!picked) return;
     await share(Array.isArray(picked) ? picked : [picked]);
@@ -46,17 +48,25 @@
 </script>
 
 <section class="dock" aria-label="Share files">
-  <h1>Send files straight from this computer</h1>
-  <p class="muted lede">
-    Drop files or folders anywhere in this window, or choose them below. Ferry makes a ticket you
-    can send to anyone; they download directly from you while Ferry is running.
-  </p>
+  {#if isMobile()}
+    <h1>Send files straight from this phone</h1>
+    <p class="muted lede">
+      Choose files or a folder, or share them to Ferry from any app. Ferry keeps a copy and makes a
+      ticket; they download directly from your phone while sharing is on.
+    </p>
+  {:else}
+    <h1>Send files straight from this computer</h1>
+    <p class="muted lede">
+      Drop files or folders anywhere in this window, or choose them below. Ferry makes a ticket you
+      can send to anyone; they download directly from you while Ferry is running.
+    </p>
+  {/if}
 
   <div class="pier glass">
   {#if app.importing}
     <div class="importing" aria-live="polite">
       <p>
-        Preparing the ticket…
+        {app.importing.copying ? "Copying the files into Ferry…" : "Preparing the ticket…"}
         {#if app.importing.totalBytes > 0}
           <span class="muted">{bytes(app.importing.doneBytes)} of {bytes(app.importing.totalBytes)}</span>
         {/if}
@@ -70,7 +80,7 @@
     <div class="actions">
       <button class="primary" onclick={() => pick(false)}>Choose files</button>
       <button onclick={() => pick(true)}>Choose a folder</button>
-      <span class="muted hint">or drop them here</span>
+      {#if !isMobile()}<span class="muted hint">or drop them here</span>{/if}
     </div>
   {/if}
   </div>
