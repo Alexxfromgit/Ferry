@@ -219,12 +219,33 @@ jobs:
           gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
 
   # Android starts once the Direct signing certificate is configured; see docs/RELEASING.md.
+  # Job conditions can't read environment variables, so this job reads it for them.
+  android-config:
+    name: Android configuration
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: android-release
+    permissions: {}
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          ENABLED: ${{ vars.FERRY_DIRECT_CERT_SHA256 != '' }}
+        run: |
+          echo "enabled=$ENABLED" >> "$GITHUB_OUTPUT"
+          if [[ "$ENABLED" != true ]]; then
+            echo "::notice::Set FERRY_DIRECT_CERT_SHA256 to release the Android app. See docs/RELEASING.md."
+          fi
+
   # Both channels are built from the tag: the Direct APK (ferry/android on R2, with its update
   # feed) and the Play bundle (the internal testing track). Neither goes on the GitHub release.
   build-android:
     name: Android
-    needs: prepare
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && vars.FERRY_DIRECT_CERT_SHA256 != '' }}
+    needs: [prepare, android-config]
+    if: ${{ !cancelled() && needs.android-config.outputs.enabled == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     environment: android-release

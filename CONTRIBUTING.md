@@ -78,7 +78,7 @@ The Rust side reads the channel as `env!("FERRY_DISTRIBUTION")`. Phone-only Rust
 `app/src-tauri/plugins/ferry-mobile` and `UpdatePlugin` in each channel folder.
 Release signing reads `gen/android/keystore.properties` (gitignored) or environment variables;
 see [Releasing](docs/RELEASING.md#android). CI builds both channels as debug APKs and checks
-them with `scripts/android-release.mjs`, whose tests run with `node --test scripts/`.
+them with `scripts/android-release.mjs`, whose tests run with `node --test "scripts/*.test.mjs"`.
 
 To preview the phone layout in a browser, run `npm --prefix app run dev` and open
 `http://localhost:1420/?mobile` with the browser's device toolbar.

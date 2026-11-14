@@ -94,8 +94,8 @@ The Android app ships in two channels built from the same project (see
 | Signed with | The Direct key, which you keep | Your upload key; Google re-signs with the app signing key |
 | Updates | Installed copies read `ferry/android/latest.json` | Google Play |
 
-The Release workflow's Android jobs run only when the repository variable
-`FERRY_DIRECT_CERT_SHA256` is set. Until then, releases ship the desktop app alone. With it set:
+The Release workflow's Android jobs run only when the variable `FERRY_DIRECT_CERT_SHA256` is
+set. Until then, releases ship the desktop app alone. With it set:
 
 1. **Android** builds the Direct APK (arm64 and armv7) and the Play bundle (arm64, armv7 and
    x86_64) from the tag. It checks the APK's package, version, signer and that it isn't
@@ -112,22 +112,30 @@ The Release workflow's Android jobs run only when the repository variable
 
 ### Create the keys and accounts
 
-Work in a folder outside the repository, for example `C:\Users\<you>\keys\ferry`. Create every
-password in your password manager and save it there straight away. `keytool` comes with the JDK.
+Keep the keys in a folder outside the repository. Create every password in your password manager
+and save it there straight away. The commands are for PowerShell 7. They use full paths because
+.NET methods such as `[IO.File]::ReadAllBytes` don't follow `cd`. `keytool` comes with the JDK
+but often isn't on `PATH`, so they call it from `JAVA_HOME`; any JDK works for this.
+
+```powershell
+$keys = "$HOME\keys\ferry"
+New-Item -ItemType Directory -Force $keys | Out-Null
+$keytool = Join-Path $env:JAVA_HOME 'bin\keytool.exe'
+```
 
 **Direct signing key.** Create it, then note the `SHA256:` fingerprint the second command prints.
 
 ```powershell
-keytool -genkeypair -v -storetype PKCS12 -keystore ferry-direct.p12 -alias ferry-direct -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Ferry, O=Xenvault Interactive"
-keytool -list -v -keystore ferry-direct.p12 -alias ferry-direct
+& $keytool -genkeypair -v -storetype PKCS12 -keystore "$keys\ferry-direct.p12" -alias ferry-direct -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=Ferry, O=Xenvault Interactive"
+& $keytool -list -v -keystore "$keys\ferry-direct.p12" -alias ferry-direct | Select-String 'Alias name|SHA256:'
 ```
 
 PKCS12 keystores use one password for the store and the key. The `-dname` text is public: it's
 inside every APK. Back up `ferry-direct.p12` and its password offline as well. **Nothing can
 replace this key**: without it Direct users can't update, and have to uninstall and reinstall.
 
-**Play upload key.** Repeat with `-keystore ferry-upload.p12 -alias upload`. Play support can
-reset a lost or leaked upload key.
+**Play upload key.** Repeat with `-keystore "$keys\ferry-upload.p12" -alias upload`. Play
+support can reset a lost or leaked upload key.
 
 **Google Play Console.**
 
@@ -163,51 +171,62 @@ reset a lost or leaked upload key.
 ### Configure GitHub
 
 Create an environment named `android-release` under **Settings → Environments**, and limit its
-deployment branches to `main`. Its secrets are only given to the Android release jobs.
+deployment branches to `main`. The values below go in that environment, so only the Android
+release jobs receive them.
 
-Encode each keystore for its secret, then set the secrets with the GitHub CLI. It prompts for
-values that aren't piped in, which keeps them out of your shell history.
+Set them with the GitHub CLI. Without `--body`, `gh secret set` prompts for the value, which
+keeps passwords out of your shell history.
 
 ```powershell
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("ferry-direct.p12")) | gh secret set ANDROID_DIRECT_KEYSTORE_B64 --env android-release --repo Alexxfromgit/Ferry
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("ferry-upload.p12")) | gh secret set ANDROID_UPLOAD_KEYSTORE_B64 --env android-release --repo Alexxfromgit/Ferry
-gh secret set ANDROID_DIRECT_KEYSTORE_PASSWORD --env android-release --repo Alexxfromgit/Ferry
-Get-Content service-account.json -Raw | gh secret set PLAY_SERVICE_ACCOUNT_JSON --env android-release --repo Alexxfromgit/Ferry
+$repo = 'Alexxfromgit/Ferry'
+$direct = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$keys\ferry-direct.p12"))
+gh secret set ANDROID_DIRECT_KEYSTORE_B64 --env android-release --repo $repo --body $direct
+$upload = [Convert]::ToBase64String([IO.File]::ReadAllBytes("$keys\ferry-upload.p12"))
+gh secret set ANDROID_UPLOAD_KEYSTORE_B64 --env android-release --repo $repo --body $upload
+gh secret set ANDROID_DIRECT_KEYSTORE_PASSWORD --env android-release --repo $repo
+gh secret set PLAY_SERVICE_ACCOUNT_JSON --env android-release --repo $repo --body (Get-Content "$keys\play-service-account.json" -Raw)
+gh variable set FERRY_DIRECT_CERT_SHA256 --env android-release --repo $repo --body 'AB:CD:…'
 ```
 
 | Kind | Name | Value |
 | --- | --- | --- |
-| Environment secret | `ANDROID_DIRECT_KEYSTORE_B64` | The Direct keystore, base64 |
-| Environment secret | `ANDROID_DIRECT_KEYSTORE_PASSWORD` | Its password |
-| Environment secret | `ANDROID_UPLOAD_KEYSTORE_B64` | The upload keystore, base64 |
-| Environment secret | `ANDROID_UPLOAD_KEYSTORE_PASSWORD` | Its password |
-| Environment secret | `PLAY_SERVICE_ACCOUNT_JSON` | The service account's JSON key |
-| Environment secret | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | The R2 API token's keys |
-| Repository variable | `R2_ACCOUNT_ID` | Your Cloudflare account ID |
-| Repository variable | `R2_BUCKET` | The bucket name |
-| Repository variable | `FERRY_DIRECT_CERT_SHA256` | The Direct fingerprint; setting it turns the Android jobs on |
-| Repository variable | `PLAY_RELEASE_STATUS` | Optional. `completed` once the app's first review has passed, so internal testers get each build at once. Until then Google Play only accepts `draft` releases, the default |
+| Secret | `ANDROID_DIRECT_KEYSTORE_B64` | The Direct keystore, base64 |
+| Secret | `ANDROID_DIRECT_KEYSTORE_PASSWORD` | Its password |
+| Secret | `ANDROID_UPLOAD_KEYSTORE_B64` | The upload keystore, base64 |
+| Secret | `ANDROID_UPLOAD_KEYSTORE_PASSWORD` | Its password |
+| Secret | `PLAY_SERVICE_ACCOUNT_JSON` | The service account's JSON key |
+| Secret | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | The R2 API token's keys |
+| Variable | `R2_ACCOUNT_ID` | Your Cloudflare account ID: 32 hex characters, also the first part of the bucket's S3 API URL |
+| Variable | `R2_BUCKET` | The bucket name |
+| Variable | `FERRY_DIRECT_CERT_SHA256` | The Direct fingerprint; setting it turns the Android jobs on |
+| Variable | `PLAY_RELEASE_STATUS` | Optional. `completed` once the app's first review has passed, so internal testers get each build at once. Until then Google Play only accepts `draft` releases, the default |
 
 `ANDROID_DIRECT_KEY_ALIAS` and `ANDROID_UPLOAD_KEY_ALIAS` variables override the default key
 aliases, `ferry-direct` and `upload`. Without `PLAY_SERVICE_ACCOUNT_JSON`, the Play job leaves
-the bundle in the run's `android-play` artifact for a manual upload. Delete the base64 and JSON
-files once the secrets are set; keep your backups in the password manager.
+the bundle in the run's `android-play` artifact for a manual upload. Keep the keystores and the
+JSON key backed up in your password manager.
 
 ### Build a signed bundle or APK locally
 
 The Gradle build reads signing keys from environment variables, or from
 `app/src-tauri/gen/android/keystore.properties` (gitignored) with keys such as
 `uploadStoreFile`, `uploadStorePassword`, `uploadKeyAlias` and `uploadKeyPassword`. For the
-first Play upload, in PowerShell from the repository root:
+first Play upload, in PowerShell 7 from the repository root, with the JDK 21 and NDK the
+[Android build](../CONTRIBUTING.md#android) uses (adjust both paths to your installs):
 
 ```powershell
+$env:JAVA_HOME = 'C:\Program Files\Java\jdk-21.0.12'
+$env:NDK_HOME = Get-ChildItem "$env:LOCALAPPDATA\Android\Sdk\ndk" | Sort-Object Name | Select-Object -Last 1 -ExpandProperty FullName
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 $env:ORG_GRADLE_PROJECT_ferryDist = 'play'
-$env:ANDROID_UPLOAD_KEYSTORE = 'C:\Users\<you>\keys\ferry\ferry-upload.p12'
+$env:ANDROID_UPLOAD_KEYSTORE = "$HOME\keys\ferry\ferry-upload.p12"
 $env:ANDROID_UPLOAD_KEY_ALIAS = 'upload'
 $env:ANDROID_UPLOAD_KEYSTORE_PASSWORD = Read-Host -MaskInput 'Upload key password'
 $env:ANDROID_UPLOAD_KEY_PASSWORD = $env:ANDROID_UPLOAD_KEYSTORE_PASSWORD
-npm --prefix app run tauri android build -- --aab --target aarch64 armv7 x86_64
+npm.cmd --prefix app run tauri android build -- --aab --target aarch64 armv7 x86_64
 ```
+
+The variables last until you close the PowerShell window.
 
 The bundle is `app/src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab`.
 For a Direct APK, use `ferryDist = 'direct'`, the `ANDROID_DIRECT_*` variables and
