@@ -2,7 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, message } from "./api";
 import { plural } from "./format";
-import type { DownloadInfo, FerryEvent, NodeStatus, Preview, ShareActivity, ShareInfo } from "./types";
+import type { AppInfo, DownloadInfo, FerryEvent, NodeStatus, Preview, SaveState, ShareActivity, ShareInfo } from "./types";
 
 export type View = "send" | "receive" | "settings";
 export type DragKind = "files" | "tickets";
@@ -25,6 +25,10 @@ const LAYOUT_KEY = "ferry.sendView";
 
 export const app = $state({
   view: "send" as View,
+  /** What kind of Ferry this is (desktop, or a phone build); null until `init` loads it. */
+  info: null as AppInfo | null,
+  /** Android: where each completed download's files went, by download id. */
+  saved: {} as Record<string, SaveState>,
   status: null as NodeStatus | null,
   shares: [] as ShareInfo[],
   activity: {} as Record<string, ShareActivity>,
@@ -304,13 +308,32 @@ export async function init() {
   }
 }
 
+async function loadSaved() {
+  try {
+    app.saved = await api.savedDownloads();
+  } catch (err) {
+    toast(`Couldn't check saved downloads: ${message(err)}`, true);
+  }
+}
+
+/** Phones receive only for now, so they open on Receive and have no Send tab. */
+export function isMobile(): boolean {
+  return app.info?.mobile ?? false;
+}
+
 async function initRest() {
+  app.info = await api.appInfo();
+  if (isMobile()) app.view = "receive";
+  if (app.info.platform === "android") {
+    await listen("ferry-saved", () => void loadSaved());
+    await loadSaved();
+  }
   await listen<FerryEvent>("ferry-event", (e) => onEvent(e.payload));
   await listen("ferry-open-link", () => void takeIncoming());
   await listen("ferry-resync", () => void resync());
 
-  // Dropping files anywhere shares them; dropping .ferry files opens them.
-  await getCurrentWebview().onDragDropEvent(async (e) => {
+  // Dropping files anywhere shares them; dropping .ferry files opens them. Phones can't drop.
+  if (!isMobile()) await getCurrentWebview().onDragDropEvent(async (e) => {
     const p = e.payload;
     if (p.type === "enter") {
       app.dragKind = dragKind(p.paths);

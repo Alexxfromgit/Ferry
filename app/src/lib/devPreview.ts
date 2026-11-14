@@ -97,9 +97,11 @@ const fakeQr = (() => {
 })();
 
 // ?empty starts with nothing shared or downloaded; ?slow holds the startup splash for 2 seconds.
+// ?mobile previews the phone build.
 const params = new URLSearchParams(location.search);
 const empty = params.has("empty");
 const slow = params.has("slow");
+const mobile = params.has("mobile");
 
 const status = {
   nodeId: hex(9),
@@ -146,6 +148,22 @@ export function installDevPreview() {
         case "set_settings":
           Object.assign(settings, (args as { settings: typeof settings }).settings);
           return false;
+        case "app_info":
+          return mobile
+            ? { platform: "android", mobile: true, distribution: "direct" }
+            : { platform: "windows", mobile: false, distribution: "desktop" };
+        case "saved_downloads":
+          return {
+            [downloads[2].id]: {
+              state: "saved",
+              location: "Download/Ferry/Recipes",
+              files: [{ uri: "content://x/1", name: "a.pdf" }, { uri: "content://x/2", name: "b.pdf" }],
+            },
+          };
+        case "open_download":
+        case "share_download":
+        case "retry_save":
+          return null;
         case "update_info":
           return { version, support: "unavailable", autoCheck: true, readyVersion: null };
         case "take_pending_links":

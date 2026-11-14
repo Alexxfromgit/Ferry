@@ -1,0 +1,4 @@
+<resources>
+    <string name="ferry_transfers_channel">Transfers</string>
+    <string name="ferry_transfers_channel_description">Progress of files Ferry is receiving</string>
+</resources>

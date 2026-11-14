@@ -172,8 +172,88 @@ $appImages = foreach ($s in $IcoSizes) {
 Save-Ico $appImages (Join-Path $icons 'icon.ico')
 $publicLogo = Resize-Bitmap $master 256
 $publicLogo.Save((Join-Path $root 'app\public\ferry-icon.png'), [System.Drawing.Imaging.ImageFormat]::Png)
-$appArt.Dispose()
 Write-Host "App icon: icon.ico, platform sizes and app/public/ferry-icon.png"
+
+# -------------------------------------------------------------- phone icons
+#
+# Phones cut app icons to their own shapes, so they get the art full-bleed (square, not the
+# rounded desktop master):
+#   - iOS (icons/ios): opaque squares, which iOS rounds itself.
+#   - Android (icons/android): an adaptive icon. Launchers show only the middle 72 of its
+#     108 dp and cut that to a circle or squircle, so the art fills the middle (plus a little,
+#     for the parallax effect) over a background of the art's own edge colour. The legacy
+#     ic_launcher PNGs keep the rounded desktop look.
+# Both sets are copied into the Android Studio project (gen/android) when it exists.
+
+function Get-EdgeColor([System.Drawing.Bitmap]$bmp) {
+    $r = 0; $g = 0; $b = 0; $n = 0
+    $w = $bmp.Width; $h = $bmp.Height
+    $edge = @(for ($x = 0; $x -lt $w; $x += 8) { , @($x, 0); , @($x, ($h - 1)) }) +
+        @(for ($y = 0; $y -lt $h; $y += 8) { , @(0, $y); , @(($w - 1), $y) })
+    foreach ($p in $edge) {
+        $c = $bmp.GetPixel($p[0], $p[1]); $r += $c.R; $g += $c.G; $b += $c.B; $n++
+    }
+    return '#{0:X2}{1:X2}{2:X2}' -f [int]($r / $n), [int]($g / $n), [int]($b / $n)
+}
+
+$square = Resize-Bitmap $appArt 1024
+$squarePath = Join-Path $icons 'source-square.png'
+$square.Save($squarePath, [System.Drawing.Imaging.ImageFormat]::Png)
+$phoneOut = Join-Path ([System.IO.Path]::GetTempPath()) "ferry-phone-icons-$PID"
+Push-Location (Join-Path $root 'app')
+try {
+    & npx tauri icon $squarePath -o $phoneOut | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "tauri icon failed" }
+} finally {
+    Pop-Location
+    Remove-Item $squarePath -ErrorAction SilentlyContinue # intermediate only
+}
+Remove-Item (Join-Path $icons 'ios') -Recurse -Force -ErrorAction SilentlyContinue
+Copy-Item (Join-Path $phoneOut 'ios') (Join-Path $icons 'ios') -Recurse
+Remove-Item $phoneOut -Recurse -Force
+
+$edgeColor = Get-EdgeColor $square
+$density = [ordered]@{ mdpi = 1; hdpi = 1.5; xhdpi = 2; xxhdpi = 3; xxxhdpi = 4 }
+foreach ($name in $density.Keys) {
+    $layer = [int](108 * $density[$name])
+    $side = [int][Math]::Round(76 * $density[$name])
+    $art = Resize-Bitmap $square $side
+    $fg = New-Canvas $layer
+    $g = New-Graphics $fg
+    $at = [int](($layer - $side) / 2)
+    $g.DrawImage($art, $at, $at, $side, $side)
+    $g.Dispose()
+    $fg.Save((Join-Path $icons "android\mipmap-$name\ic_launcher_foreground.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+    $fg.Dispose(); $art.Dispose()
+}
+Set-Content -Encoding utf8NoBOM -Path (Join-Path $icons 'android\values\ic_launcher_background.xml') -Value @"
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <!-- The edge colour of icons/source.png, behind the adaptive icon's art. -->
+  <color name="ic_launcher_background">$edgeColor</color>
+</resources>
+"@
+$square.Dispose()
+$appArt.Dispose()
+
+$genRes = Join-Path $root 'app\src-tauri\gen\android\app\src\main\res'
+if (Test-Path $genRes) {
+    $from = Join-Path $icons 'android'
+    Get-ChildItem $from -Recurse -File | ForEach-Object {
+        $to = Join-Path $genRes ($_.FullName.Substring($from.Length + 1))
+        New-Item -ItemType Directory -Force (Split-Path $to) | Out-Null
+        Copy-Item $_.FullName $to -Force
+    }
+    # The project template's placeholder icon, replaced by the adaptive icon above.
+    foreach ($old in 'drawable\ic_launcher_background.xml', 'drawable-v24\ic_launcher_foreground.xml') {
+        Remove-Item (Join-Path $genRes $old) -ErrorAction SilentlyContinue
+    }
+    foreach ($dir in 'drawable', 'drawable-v24') {
+        $path = Join-Path $genRes $dir
+        if ((Test-Path $path) -and -not (Get-ChildItem $path)) { Remove-Item $path }
+    }
+}
+Write-Host "Phone icons: icons/ios, icons/android (adaptive, background $edgeColor)$(if (Test-Path $genRes) { ', copied into gen/android' })"
 
 # ----------------------------------------------------------- .ferry file icon
 

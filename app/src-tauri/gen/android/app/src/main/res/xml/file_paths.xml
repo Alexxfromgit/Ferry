@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Files Ferry hands to other apps through its FileProvider: only verified Direct updates,
+     passed to Android's installer. -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+  <cache-path name="updates" path="direct-updates/" />
+</paths>

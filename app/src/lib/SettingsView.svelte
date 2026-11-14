@@ -3,8 +3,9 @@
   import { writeText } from "@tauri-apps/plugin-clipboard-manager";
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, message } from "./api";
-  import { app, toast } from "./store.svelte";
+  import { app, isMobile, toast } from "./store.svelte";
   import {
+    canUpdate as updatable,
     checkForUpdates,
     restartToUpdate,
     setAutoCheck,
@@ -18,7 +19,7 @@
   let relayUrl = $state("");
   /** True while the saved relay differs from the one Ferry is running with. */
   let restartNeeded = $state(false);
-  const canUpdate = $derived(updates.info?.support === "available");
+  const canUpdate = $derived(updatable(updates.info));
 
   onMount(() => {
     api.getSettings().then((s) => {
@@ -76,25 +77,34 @@
   {#if settings}
     <section class="glass card">
       <h2>Downloads</h2>
-      <div class="field">
-        <span class="label">Save received files to</span>
-        <div class="value">
-          <span class="code path" title={settings.downloadDir}>{settings.downloadDir}</span>
-          <button onclick={chooseDownloadDir}>Change</button>
+      {#if isMobile()}
+        <p class="muted hint">
+          Received files are saved to <span class="code">Downloads/Ferry</span>, where your Files app and other apps
+          can find them.
+        </p>
+      {:else}
+        <div class="field">
+          <span class="label">Save received files to</span>
+          <div class="value">
+            <span class="code path" title={settings.downloadDir}>{settings.downloadDir}</span>
+            <button onclick={chooseDownloadDir}>Change</button>
+          </div>
         </div>
-      </div>
+      {/if}
     </section>
 
-    <section class="glass card">
-      <h2>Window</h2>
-      <label class="check">
-        <input type="checkbox" bind:checked={settings.closeToTray} onchange={persist} />
-        <span>
-          Keep sharing when the window is closed
-          <span class="muted hint">Ferry stays in the system tray. Use Quit Ferry from the tray to stop.</span>
-        </span>
-      </label>
-    </section>
+    {#if !isMobile()}
+      <section class="glass card">
+        <h2>Window</h2>
+        <label class="check">
+          <input type="checkbox" bind:checked={settings.closeToTray} onchange={persist} />
+          <span>
+            Keep sharing when the window is closed
+            <span class="muted hint">Ferry stays in the system tray. Use Quit Ferry from the tray to stop.</span>
+          </span>
+        </label>
+      </section>
+    {/if}
 
     <section class="glass card">
       <h2>Appearance</h2>
@@ -181,7 +191,7 @@
         >Check now</button>
         {#if updates.info.readyVersion}
           <button onclick={restartToUpdate} disabled={updates.installing || updates.checking || transferring()}>
-            Restart to update
+            {isMobile() ? "Install update" : "Restart to update"}
           </button>
         {/if}
       </div>
@@ -195,11 +205,13 @@
       {#if updates.installing}
         <p class="muted hint">Installing update…</p>
       {:else if updates.checking}
-        <p class="muted hint">Checking for and downloading updates…</p>
+        <p class="muted hint">
+          {updates.info?.support === "store" ? "Checking Google Play for updates…" : "Checking for and downloading updates…"}
+        </p>
       {:else if updates.info?.readyVersion}
         <p class="muted hint">
           Ferry {updates.info.readyVersion} is ready to install.
-          {#if transferring()}Wait for active transfers to finish before restarting.{/if}
+          {#if transferring()}Wait for active transfers to finish before {isMobile() ? "updating" : "restarting"}.{/if}
         </p>
       {/if}
       {#if updates.status}<p class="muted hint">{updates.status}</p>{/if}
@@ -220,7 +232,7 @@
         Ferry {#if updates.info}<span class="h-count">{updates.info.version}</span>{/if}
       </h2>
       <p class="muted hint">
-        Files go straight from one computer to another, end-to-end encrypted. Free and open
+        Files go straight from one device to another, end-to-end encrypted. Free and open
         source under the MIT license.
       </p>
       <div class="links">
@@ -238,6 +250,8 @@
 
   .groups {
     display: grid;
+    /* minmax(0, …): long unbroken values (device ID, paths) shrink instead of widening the page. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 1rem;
     max-width: 660px;
   }
@@ -254,6 +268,7 @@
 
   .field {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.3rem;
   }
 
@@ -390,5 +405,34 @@
 
   .version {
     margin-top: 0.75rem;
+  }
+
+  /* Narrow screens: the mascot sits above the text, fading into it downwards. */
+  @media (max-width: 600px) {
+    .about.artwork {
+      flex-direction: column;
+      align-items: stretch;
+      padding: 0 1.2rem 0 1.2rem;
+      gap: 0;
+    }
+
+    .banner {
+      width: auto;
+      margin: 0 -1.2rem;
+      min-height: 180px;
+      -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent);
+      mask-image: linear-gradient(to bottom, #000 60%, transparent);
+    }
+
+    .banner img {
+      left: 50%;
+      width: max(100%, 360px);
+      top: -70px;
+      transform: translateX(-50%);
+    }
+
+    .about.artwork .about-text {
+      padding-top: 0;
+    }
   }
 </style>

@@ -68,6 +68,7 @@ beforeEach(() => {
     list_downloads: () => [],
     node_status: () => ({ nodeId: "n", directAddresses: [] }),
     take_pending_links: () => [],
+    app_info: () => ({ platform: "linux", mobile: false, distribution: "desktop" }),
     get_settings: () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: true }),
   };
   invoke.mockReset();

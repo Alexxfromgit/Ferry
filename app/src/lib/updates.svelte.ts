@@ -27,9 +27,14 @@ export function initUpdates() {
   };
 }
 
+/** Whether this copy of Ferry can update itself (or ask Google Play to). */
+export function canUpdate(info: UpdateInfo | null = updates.info): boolean {
+  return info?.support === "available" || info?.support === "store";
+}
+
 export async function setAutoCheck(enabled: boolean) {
   const info = updates.info;
-  if (info?.support !== "available" || updates.saving) return;
+  if (!info || !canUpdate(info) || updates.saving) return;
   updates.saving = true;
   try {
     await api.setAutoCheckUpdates(enabled);
@@ -44,7 +49,7 @@ export async function setAutoCheck(enabled: boolean) {
 
 export async function checkForUpdates(automatic = false) {
   const info = updates.info;
-  if (info?.support !== "available" || updates.checking || updates.installing || info.readyVersion) return;
+  if (!info || !canUpdate(info) || updates.checking || updates.installing || info.readyVersion) return;
   if (automatic && !info.autoCheck) return;
   updates.checking = true;
   if (!automatic) updates.status = "";
