@@ -82,6 +82,12 @@ pub fn is_share_url(input: &str) -> bool {
     strip_scheme(input).is_some() || strip_web_prefix(input).is_some()
 }
 
+/// Whether `input` is a `ferry://` link, the only kind the desktop deep-link handler receives.
+/// Web links passed on the command line arrive only as arguments.
+pub fn is_app_url(input: &str) -> bool {
+    strip_scheme(input.trim()).is_some()
+}
+
 fn strip_scheme(input: &str) -> Option<&str> {
     let (scheme, rest) = input.split_once("://")?;
     scheme.eq_ignore_ascii_case(LINK_SCHEME).then_some(rest)
@@ -234,6 +240,9 @@ mod tests {
         assert!(is_share_url("ferry://get?t=x"));
         assert!(!is_share_url(&t.to_string()));
         assert!(!is_share_url(r"C:\Users\me\share.ferry"));
+        assert!(is_app_url(" FERRY://get?t=x"));
+        assert!(!is_app_url(&url));
+        assert!(!is_app_url(r"C:\Users\me\share.ferry"));
         for other in [
             format!("https://ferry.xenvaultinteractive.com.evil.test/get#{t}"),
             format!("https://evil.test/get#{t}"),
