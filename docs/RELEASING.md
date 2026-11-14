@@ -110,9 +110,10 @@ set. Until then, releases ship the desktop app alone. With it set:
 
 **Build numbers.** Android's `versionCode` is a plain counter that both channels share: each
 release builds with one more than the highest build already released on Google Play (any
-track, drafts included) or in the Direct feed. The first release is build 1, and every later
-one adds one, whether the version went from 0.3.0 to 0.3.1 or a release was rebuilt without a
-version change. Numbers Google Play took for uploads that were never released are skipped,
+track, drafts included) or in the Direct feed. Every release adds one, whether the version
+went from 0.3.0 to 0.3.1 or a release was rebuilt without a version change. Ferry's first
+Google Play upload was build 2000 (Tauri's number for 0.2.0) and Google Play never goes back,
+so Ferry's releases count on from 2001. Numbers Google Play took for uploads that were never released are skipped,
 since it never accepts one twice. The users see the version, such as 0.3.1; Play Console shows
 both. `scripts/android-version-code.mjs` picks the number.
 
