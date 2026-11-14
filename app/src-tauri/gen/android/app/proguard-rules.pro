@@ -20,6 +20,13 @@
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
 
+# ML Kit (the QR scanner) creates its components through their no-argument constructors, found
+# by reflection. R8's full mode keeps the classes but drops those constructors, and the scanner
+# then crashes the app on its first camera frame.
+-keepclassmembers class * implements com.google.firebase.components.ComponentRegistrar {
+    public <init>();
+}
+
 # Tauri loads Ferry's update plugin by class name (see src/direct and src/play).
 -keep class com.xenvaultinteractive.ferry.UpdatePlugin { *; }
 -keep class com.xenvaultinteractive.ferry.UpdatePlugin$* { *; }
