@@ -113,9 +113,13 @@ release builds with one more than the highest build already released on Google P
 track, drafts included) or in the Direct feed. Every release adds one, whether the version
 went from 0.3.0 to 0.3.1 or a release was rebuilt without a version change. Ferry's first
 Google Play upload was build 2000 (Tauri's number for 0.2.0) and Google Play never goes back,
-so Ferry's releases count on from 2001. Numbers Google Play took for uploads that were never released are skipped,
-since it never accepts one twice. The users see the version, such as 0.3.1; Play Console shows
-both. `scripts/android-version-code.mjs` picks the number.
+so Ferry's releases count on from 2001, even when Google Play's history can't be read. Numbers
+Google Play took for uploads that were never released are skipped, since it never accepts one
+twice. Without `PLAY_SERVICE_ACCOUNT_JSON` a release sees only the Direct feed: if you upload a
+build to Google Play by hand that the feed doesn't have, set the `ANDROID_VERSION_CODE_FLOOR`
+variable to the highest build in Play Console, and releases count on from there. Users see the
+version, such as 0.3.1, except in Google Play's update prompt in the app, which only knows the
+build; Play Console shows both. `scripts/android-version-code.mjs` picks the number.
 
 ### Create the keys and accounts
 
@@ -206,6 +210,7 @@ gh variable set FERRY_DIRECT_CERT_SHA256 --env android-release --repo $repo --bo
 | Variable | `R2_ACCOUNT_ID` | Your Cloudflare account ID: 32 hex characters, also the first part of the bucket's S3 API URL |
 | Variable | `R2_BUCKET` | The bucket name |
 | Variable | `FERRY_DIRECT_CERT_SHA256` | The Direct fingerprint; setting it turns the Android jobs on |
+| Variable | `ANDROID_VERSION_CODE_FLOOR` | Optional. The highest build in Play Console when the Direct feed is behind it and releases can't read Google Play (no `PLAY_SERVICE_ACCOUNT_JSON`); see "Build numbers" |
 | Variable | `PLAY_RELEASE_STATUS` | Optional. `completed` once the app's first review has passed, so internal testers get each build at once. Until then Google Play only accepts `draft` releases, the default |
 
 `ANDROID_DIRECT_KEY_ALIAS` and `ANDROID_UPLOAD_KEY_ALIAS` variables override the default key
@@ -240,7 +245,7 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-21.0.12'
 $env:NDK_HOME = Get-ChildItem "$env:LOCALAPPDATA\Android\Sdk\ndk" | Sort-Object Name | Select-Object -Last 1 -ExpandProperty FullName
 rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 $env:ORG_GRADLE_PROJECT_ferryDist = 'play'
-$env:ORG_GRADLE_PROJECT_ferryVersionCode = '1'   # the build number; see "Build numbers" above
+$env:ORG_GRADLE_PROJECT_ferryVersionCode = '2001'   # one more than the highest build in Play Console; see "Build numbers" above
 $env:ANDROID_UPLOAD_KEYSTORE = "$HOME\keys\ferry\ferry-upload.p12"
 $env:ANDROID_UPLOAD_KEY_ALIAS = 'upload'
 $env:ANDROID_UPLOAD_KEYSTORE_PASSWORD = Read-Host -MaskInput 'Upload key password'

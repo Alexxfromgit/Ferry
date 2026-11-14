@@ -40,6 +40,21 @@ pub fn transfer_text<'a>(
     Some((title, text, progress))
 }
 
+/// Title and text while completed downloads are copied into Downloads, given their names, or
+/// `None` when nothing is being saved.
+pub fn saving_text<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<(String, String)> {
+    let names: Vec<_> = names.into_iter().collect();
+    let title = match names.as_slice() {
+        [] => return None,
+        [one] => format!(
+            "Saving {} to Downloads",
+            if one.is_empty() { "files" } else { one }
+        ),
+        many => format!("Saving {} downloads to Downloads", many.len()),
+    };
+    Some((title, "Copying files…".to_owned()))
+}
+
 /// A share that is on, as the notification describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sharing {
@@ -164,6 +179,17 @@ mod tests {
             eta_secs: None,
             connection: None,
         }
+    }
+
+    #[test]
+    fn saving_counts_as_work_in_the_notification() {
+        assert!(saving_text([]).is_none());
+        assert_eq!(saving_text(["Trip"]).unwrap().0, "Saving Trip to Downloads");
+        assert_eq!(saving_text([""]).unwrap().0, "Saving files to Downloads");
+        assert_eq!(
+            saving_text(["Trip", "Notes"]).unwrap().0,
+            "Saving 2 downloads to Downloads"
+        );
     }
 
     #[test]
