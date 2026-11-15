@@ -16,7 +16,7 @@ anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
-dirs = "6"
+dirs = "7"
 rpassword = "7"
 
 [dev-dependencies]
