@@ -58,7 +58,7 @@
       id="link"
       type="text"
       class="code"
-      placeholder="ferry://get?t=…"
+      placeholder="Paste a Ferry link"
       bind:value={receive.link}
       spellcheck="false"
       autocomplete="off"

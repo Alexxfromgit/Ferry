@@ -25,7 +25,7 @@ fn share(full: bool) -> ShareInfo {
         total_size: 42,
         created_at: 1_794_500_000,
         link: if full {
-            "ferry://get?t=blob".into()
+            "https://ferry.xenvaultinteractive.com/get#blob".into()
         } else {
             String::new()
         },

@@ -19,7 +19,7 @@
       <string>Owner</string>
       <key>LSItemContentTypes</key>
       <array>
-        <string>dev.ferry.share</string>
+        <string>com.xenvaultinteractive.ferry.share</string>
       </array>
     </dict>
   </array>
@@ -27,7 +27,7 @@
   <array>
     <dict>
       <key>UTTypeIdentifier</key>
-      <string>dev.ferry.share</string>
+      <string>com.xenvaultinteractive.ferry.share</string>
       <key>UTTypeDescription</key>
       <string>Ferry share file</string>
       <key>UTTypeConformsTo</key>

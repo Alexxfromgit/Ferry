@@ -44,7 +44,7 @@ enum Command {
     },
     /// Keep serving all existing shares until Ctrl+C.
     Serve,
-    /// Download a share from a ferry:// link, a ticket, or a .ferry file.
+    /// Download a share from a share link, a ticket, or a .ferry file.
     Get {
         link: String,
         /// Destination folder (default: current directory).

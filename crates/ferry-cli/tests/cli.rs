@@ -52,7 +52,7 @@ fn start_sharing(data_dir: &Path, path: &Path, ticket_file: &Path) -> (Sender, S
         let line = rx
             .recv_timeout(left)
             .expect("`ferry share` printed no link");
-        if line.starts_with("ferry://") {
+        if line.starts_with("https://ferry.xenvaultinteractive.com/get#") {
             return (sender, line);
         }
     }
@@ -129,7 +129,7 @@ fn share_reports_what_it_left_out() {
     let stdout = child.stdout.take().unwrap();
     let mut lines = Vec::new();
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        let done = line.starts_with("ferry://");
+        let done = line.starts_with("https://ferry.xenvaultinteractive.com/get#");
         lines.push(line);
         if done {
             break;

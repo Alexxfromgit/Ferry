@@ -5,7 +5,7 @@
 # pkgbuild makes a component package that installs the app into /Applications, then productbuild
 # wraps it in a product archive (what Installer.app expects) limited to the app's architecture and
 # minimum macOS version. The bundle is marked non-relocatable: otherwise Installer would "upgrade"
-# any other copy of dev.ferry.desktop it finds, such as one in target/, instead of /Applications.
+# any other copy of the app (same bundle identifier) it finds, such as one in target/, instead of /Applications.
 #
 # Set APPLE_INSTALLER_SIGNING_IDENTITY to a "Developer ID Installer" identity to sign the package.
 set -euo pipefail

@@ -12,7 +12,7 @@ export const shares = [{
   "fileCount": 1,
   "totalSize": 42,
   "createdAt": 1794500000,
-  "link": "ferry://get?t=blob",
+  "link": "https://ferry.xenvaultinteractive.com/get#blob",
   "ticket": "blob",
   "skipped": [
     {
@@ -157,7 +157,7 @@ export const events = [
       "fileCount": 1,
       "totalSize": 42,
       "createdAt": 1794500000,
-      "link": "ferry://get?t=blob",
+      "link": "https://ferry.xenvaultinteractive.com/get#blob",
       "ticket": "blob",
       "skipped": [
         {

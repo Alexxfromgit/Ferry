@@ -54,7 +54,7 @@ support). It writes the in-app images and the installer images. After dependency
 2. Launch Ferry. Confirm the menu bar item works, closing the window leaves the app running,
    and **Quit Ferry** exits.
 3. With Ferry closed and then again with it running, open a sample `.ferry` file or a
-   `ferry://` link from a second device. Confirm the Receive view opens with the correct share.
+   share link from a second device (the web page hands off to `ferry://`). Confirm the Receive view opens with the correct share.
 4. Transfer a sample file and folder in both directions with the second device. Compare the
    files, try pausing and resuming a download, and confirm **Stop sharing** blocks a fresh request.
 5. Repeat a transfer with the devices on different networks to exercise internet discovery.
