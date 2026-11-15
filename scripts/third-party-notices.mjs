@@ -144,8 +144,10 @@ not be sold on its own.
 ## Artwork
 
 The app icon (\`app/src-tauri/icons/source.png\`), the .ferry file icon
-(\`app/src-tauri/icons/ferry-file-source.png\`) and the README banner (\`branding/ferry-readme.png\`)
-are supplied by the project author and are not covered by the licenses below.
+(\`app/src-tauri/icons/ferry-file-source.png\`) and everything under \`branding/\` (the mascot
+scenes, the README banner, and the Google Play graphics and screenshots), along with the app,
+installer and website images made from them, are supplied by the project author. They are not
+covered by Ferry's MIT license or the licenses below.
 
 ## Libraries by license
 

@@ -2,57 +2,87 @@
   <img src="branding/ferry-readme.png" alt="Ferry sends files straight from your computer" width="100%">
 </p>
 
-# Ferry
+# <img src="app/src-tauri/icons/128x128.png" alt="" width="36" align="top"> Ferry
 
 [![CI](https://github.com/Alexxfromgit/Ferry/actions/workflows/ci.yml/badge.svg)](https://github.com/Alexxfromgit/Ferry/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Alexxfromgit/Ferry?sort=semver)](https://github.com/Alexxfromgit/Ferry/releases/latest)
 [![License MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Send files and folders from your computer to another device, even across the internet. Ferry
-creates a share ticket you can send as a link or a small `.ferry` file. The recipient opens
-it in Ferry and downloads from your device. There is no account or cloud upload.
+Ferry sends files and folders straight from one device to another, even across the internet.
+There is no account and no cloud upload: the recipient downloads directly from you, on
+Windows, macOS, Linux and Android.
 
-- Ferry connects directly when possible and can use a relay when the network blocks a direct connection.
-- Transfers are end-to-end encrypted, verified against a BLAKE3 hash, and can resume after an interruption.
-- Shared files stay in their original location. Keep Ferry running and the files in place until the recipient finishes.
+## Download
 
-## Get Ferry
+<!-- x-release-please-start-version -->
 
-Installers are published on the [Releases page](https://github.com/Alexxfromgit/Ferry/releases).
-If there are no installers yet, you can [build Ferry from source](#build-from-source).
+Latest version: **0.2.0** · [Release notes](https://github.com/Alexxfromgit/Ferry/releases/tag/v0.2.0) · [All releases](https://github.com/Alexxfromgit/Ferry/releases)
 
-| Platform | Installer |
-| --- | --- |
-| Windows x64 | `.exe` or `.msi` |
-| macOS | `.dmg` or `.pkg` for Apple silicon (arm64) or Intel (x64) |
-| Linux x64 | `.deb` or `.AppImage` built on Ubuntu 22.04 |
+| Platform | Download | Also available |
+| --- | --- | --- |
+| Windows x64 | [Installer (.exe)](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-windows-x64.exe) | [.msi](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-windows-x64.msi) |
+| macOS, Apple silicon | [Disk image (.dmg)](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-macos-arm64.dmg) | [.pkg](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-macos-arm64.pkg) |
+| macOS, Intel | [Disk image (.dmg)](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-macos-x64.dmg) | [.pkg](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-macos-x64.pkg) |
+| Linux x64 | [AppImage](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-linux-x64.AppImage) | [.deb](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-linux-x64.deb) |
+| Android 10+ | [APK from ferry.xenvaultinteractive.com](https://ferry.xenvaultinteractive.com/android) | |
 
-Under **Settings → Updates**, Ferry shows its current version and can check for updates
-automatically or on demand. Signed GitHub release builds for Windows, macOS, and AppImage
-download updates in the background and install them when you choose **Restart to update**.
-Update the Debian package through your package manager.
+<!-- x-release-please-end -->
 
-Ferry is an early desktop release. Windows has received manual testing. macOS and Linux
-desktop testing is in progress. Initial Windows installers are unsigned and macOS builds
-are unnotarized. The [release guide](docs/RELEASING.md#verifying-downloads) explains how
-to verify a download.
+Every release lists its checksums in `SHA256SUMS.txt` and carries GitHub build attestations.
+[Verifying a download](docs/RELEASING.md#verifying-downloads) explains how to check them.
 
-## Send and receive
+## Highlights
 
-1. On the sender's device, open **Send** and drop in files or a folder. You can also use **Choose files** or **Choose a folder**.
-2. Share the link or save a `.ferry` ticket file. The QR code carries the same ticket.
-3. On the receiving device, open the link or ticket file, or paste the link into **Receive**. Preview the share, choose a destination, and select **Download**.
-4. On the sender's device, select **Stop sharing** when you want to revoke access.
+- **No account, no cloud.** Files go from your device to theirs and are never uploaded anywhere.
+- **Private.** Transfers are end-to-end encrypted, and every byte is checked against a BLAKE3 hash.
+- **Works across networks.** Ferry connects directly when it can; when a network blocks that, an
+  encrypted relay passes the data along without being able to read it.
+- **Resumes.** An interrupted download picks up where it stopped.
+- **Share it your way.** A link, a QR code, or a `.ferry` ticket file, optionally protected with a
+  password.
+- **Phones too.** On Android, share to Ferry from any app's Share menu, scan a QR code to receive,
+  and find received files in Downloads/Ferry.
+- **Stays current.** Signed in-app updates on Windows, macOS, the Linux AppImage and Android.
+- **Command line.** The `ferry` CLI uses the same transfer engine.
+
+## How it works
+
+1. **Share.** Pick files or a folder. Ferry gives you a ticket: a link, a QR code and an optional
+   `.ferry` file. Your files stay where they are.
+2. **Send the ticket.** Paste the link into any chat or email, or let someone scan the QR code.
+3. **Receive.** The recipient opens it in Ferry, previews what's inside, and downloads straight
+   from your device, directly or through a relay. Keep Ferry running with sharing on until
+   they finish.
 
 Treat tickets like passwords. Anyone with an active ticket can request the share, and the
 ticket includes the sender's device ID and network addresses. Ferry also publishes device
-address records through iroh's public discovery service so tickets can keep working when a
-device changes networks. [How Ferry connects](docs/NETWORKING.md)
+address records through iroh's public discovery service so tickets keep working when a device
+changes networks. Turn sharing off to stop access. [How Ferry connects](docs/NETWORKING.md)
 
-**Save ticket file** creates a binary `.ferry` file that opens directly in Ferry. Choose
-**Save with password** to encrypt the ticket and its contents. Use a strong passphrase and
-send it separately. A link, QR code, or ordinary ticket for the same share still grants
-access on its own. Update Ferry on the receiving device to open the new files. Current Ferry
-versions can also read older JSON tickets.
+## Platforms
+
+| Platform | Updates | Status |
+| --- | --- | --- |
+| Windows x64 | In the app | Tested. Installers aren't code-signed yet, so SmartScreen asks you to confirm. |
+| macOS (Apple silicon and Intel) | In the app | Tested. Signed ad hoc but not notarized, so open it with right-click → **Open** the first time. |
+| Linux x64 | AppImage in the app; `.deb` through your package manager | Testing in progress. |
+| Android 10+ | In the app (the APK checks for new versions) | Tested. |
+
+Under **Settings → Updates**, Ferry shows its current version and can check for updates
+automatically or on demand.
+
+## Send and receive
+
+1. On the sender's device, open **Send** and drop in files or a folder, or use **Choose files**
+   or **Choose a folder**. On a phone, you can also pick **Ferry** in another app's Share menu.
+2. Share the link, show the QR code, or save a `.ferry` ticket file.
+3. On the receiving device, open the link or ticket file, scan the QR code, or paste the link
+   into **Receive**. Preview the share and select **Download**.
+4. On the sender's device, turn sharing off when you want to revoke access.
+
+**Save with password** encrypts a ticket file and its contents. Use a strong passphrase and
+send it separately. A link, QR code, or ordinary ticket for the same share still grants access
+on its own.
 
 ### Command line
 
@@ -67,10 +97,8 @@ ferry status
 ```
 
 Keep the share command running until the transfer finishes. Run `ferry --help` for
-relay and data directory options.
-
-To save an encrypted ticket, use `ferry share ./Photos --save-file protected-ticket.ferry --protect`.
-Both `share` and `get` prompt for the password in the terminal without echoing it.
+relay and data directory options. Add `--protect` to `share` to save an encrypted ticket;
+both `share` and `get` then prompt for the password without echoing it.
 
 ## Build from source
 
@@ -91,10 +119,12 @@ cd Ferry
 | Generate installers and build the CLI | `./build.sh --bundle` | `./build.ps1 -Bundle` |
 
 Release binaries are written to `target/release/` and installers to `target/release/bundle/`.
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development commands, a macOS smoke test,
-and guidance on submitting changes.
+The Android app builds from the same project; see [Android](CONTRIBUTING.md#android).
+[CONTRIBUTING.md](CONTRIBUTING.md) covers development commands, a macOS smoke test, and
+submitting changes.
 
 ## License
 
-Ferry is available under the [MIT License](LICENSE).
-[Third-party notices](THIRD_PARTY_NOTICES.md)
+Ferry is available under the [MIT License](LICENSE). The artwork under `branding/` and the app
+icons are the author's own and aren't covered by it; see the
+[third-party notices](THIRD_PARTY_NOTICES.md).
