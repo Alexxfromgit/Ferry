@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.0](https://github.com/Alexxfromgit/Ferry/compare/v0.2.0...v0.3.0) (2026-11-15)
+
+
+### Features
+
+* add the Android app for receiving shares ([#16](https://github.com/Alexxfromgit/Ferry/issues/16)) ([2d22503](https://github.com/Alexxfromgit/Ferry/commit/2d2250381098476d1dc7d9549dc2701c5798c4e6))
+* send files from Android phones ([#18](https://github.com/Alexxfromgit/Ferry/issues/18)) ([c363480](https://github.com/Alexxfromgit/Ferry/commit/c3634800f32ce5c59c321d26ca10c46a8cb2e4e8))
+* share https links and move to the com.xenvaultinteractive.ferry identifier ([#15](https://github.com/Alexxfromgit/Ferry/issues/15)) ([50282c1](https://github.com/Alexxfromgit/Ferry/commit/50282c187e165812494d3bbdf1ef818533c084fc))
+
 ## [0.2.0](https://github.com/Alexxfromgit/Ferry/compare/v0.1.0...v0.2.0) (2026-11-13)
 
 
