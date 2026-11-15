@@ -40,7 +40,11 @@ android {
         // Android 10: Ferry saves into the shared Downloads collection (MediaStore.Downloads).
         minSdk = 29
         targetSdk = 37
-        versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
+        // The build number: the release workflow passes one counter for both channels
+        // (ORG_GRADLE_PROJECT_ferryVersionCode, see scripts/android-version-code.mjs). Other
+        // builds get Tauri's number, derived from the version.
+        versionCode = (findProperty("ferryVersionCode") as String?)?.toInt()
+            ?: tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
         buildConfigField("String", "FERRY_DIST", "\"$ferryDist\"")
         if (ferryDist == "direct") {

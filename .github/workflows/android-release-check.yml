@@ -1,0 +1,135 @@
+name: Android release check
+
+# Run by hand from main after changing the android-release secrets or variables. It checks every
+# value the Android release jobs use, without building or publishing anything: the keystores
+# open with their passwords and aliases, the Direct certificate matches FERRY_DIRECT_CERT_SHA256,
+# R2 accepts a write that downloads.xenvaultinteractive.com then serves, and the Google Play
+# service account can open an edit on the app.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    name: Check the Android release setup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: android-release
+    permissions:
+      contents: read
+    env:
+      DIRECT_KEYSTORE: ${{ secrets.ANDROID_DIRECT_KEYSTORE_B64 }}
+      DIRECT_PASSWORD: ${{ secrets.ANDROID_DIRECT_KEYSTORE_PASSWORD }}
+      DIRECT_ALIAS: ${{ vars.ANDROID_DIRECT_KEY_ALIAS || 'ferry-direct' }}
+      UPLOAD_KEYSTORE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_B64 }}
+      UPLOAD_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+      UPLOAD_ALIAS: ${{ vars.ANDROID_UPLOAD_KEY_ALIAS || 'upload' }}
+      FERRY_DIRECT_CERT_SHA256: ${{ vars.FERRY_DIRECT_CERT_SHA256 }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .node-version
+      - name: Signing keys
+        run: |
+          set -uo pipefail
+          status=0
+          # Opens a keystore and sets FINGERPRINT to the key's SHA-256, or explains why it can't.
+          open_key() {
+            local name=$1 encoded=$2 password_var=$3 alias=$4 file="$RUNNER_TEMP/$1.p12" out
+            FINGERPRINT=
+            if [[ -z "$encoded" || -z "${!password_var}" ]]; then
+              echo "::error::The $name keystore or its password secret is missing."
+              return 1
+            fi
+            if ! base64 --decode <<<"$encoded" > "$file" 2>/dev/null; then
+              echo "::error::The $name keystore secret isn't valid base64."
+              return 1
+            fi
+            if ! out=$(keytool -list -v -keystore "$file" -storepass:env "$password_var" -alias "$alias" 2>&1); then
+              echo "::error::The $name keystore didn't open with alias '$alias': $(grep -m1 -iE 'error|exception' <<<"$out")"
+              return 1
+            fi
+            FINGERPRINT=$(sed -n 's/^[[:space:]]*SHA256: //p' <<<"$out" | head -1)
+          }
+          normalize() { tr -d ': \n' | tr '[:upper:]' '[:lower:]'; }
+
+          if open_key direct "$DIRECT_KEYSTORE" DIRECT_PASSWORD "$DIRECT_ALIAS"; then
+            if [[ "$(normalize <<<"$FINGERPRINT")" == "$(normalize <<<"$FERRY_DIRECT_CERT_SHA256")" ]]; then
+              echo "ok: Direct key '$DIRECT_ALIAS' matches FERRY_DIRECT_CERT_SHA256"
+            else
+              echo "::error::The Direct key's fingerprint is $FINGERPRINT, but FERRY_DIRECT_CERT_SHA256 is $FERRY_DIRECT_CERT_SHA256."
+              status=1
+            fi
+          else
+            status=1
+          fi
+          if open_key upload "$UPLOAD_KEYSTORE" UPLOAD_PASSWORD "$UPLOAD_ALIAS"; then
+            echo "ok: upload key '$UPLOAD_ALIAS' opens (SHA-256 $FINGERPRINT)"
+          else
+            status=1
+          fi
+          rm -f "$RUNNER_TEMP"/*.p12
+          exit "$status"
+      - name: Cloudflare R2 and the download host
+        if: ${{ !cancelled() }}
+        env:
+          BUCKET: ${{ vars.R2_BUCKET }}
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          set -euo pipefail
+          if [[ -z "$BUCKET" || -z "$AWS_ACCESS_KEY_ID" || -z "$AWS_SECRET_ACCESS_KEY" ]]; then
+            echo "::error::Set R2_BUCKET, R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY."
+            exit 1
+          fi
+          if [[ ! "$R2_ACCOUNT_ID" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "::error::R2_ACCOUNT_ID must be the 32-character Cloudflare account ID."
+            exit 1
+          fi
+          export AWS_ENDPOINT_URL="https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com"
+          key="ferry/android/release-check-$GITHUB_RUN_ID.txt"
+          url="https://downloads.xenvaultinteractive.com/$key"
+          echo "Ferry release check $GITHUB_RUN_ID" > "$RUNNER_TEMP/check.txt"
+          aws s3 cp "$RUNNER_TEMP/check.txt" "s3://$BUCKET/$key" --only-show-errors \
+            --content-type text/plain --cache-control no-store
+          trap 'aws s3 rm "s3://$BUCKET/$key" --only-show-errors' EXIT
+          echo "ok: R2 accepted a write to $BUCKET"
+          if [[ "$(curl -fsS --retry 3 "$url")" != "Ferry release check $GITHUB_RUN_ID" ]]; then
+            echo "::error::$url doesn't serve the bucket. Connect downloads.xenvaultinteractive.com under the bucket's Custom Domains."
+            exit 1
+          fi
+          echo "ok: $url serves the bucket"
+          headers=$(curl -fsS -o /dev/null -D - -H 'Origin: https://ferry.xenvaultinteractive.com' "$url")
+          if grep -qi '^access-control-allow-origin:' <<<"$headers"; then
+            echo "ok: CORS allows https://ferry.xenvaultinteractive.com"
+          else
+            echo "::warning::The bucket has no CORS rule for https://ferry.xenvaultinteractive.com; the website's download page will need one."
+          fi
+      - name: Google Play
+        if: ${{ !cancelled() }}
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [[ -z "$PLAY_SERVICE_ACCOUNT_JSON" ]]; then
+            echo "::warning::PLAY_SERVICE_ACCOUNT_JSON isn't set, so releases leave the Play bundle for a manual upload."
+            exit 0
+          fi
+          node scripts/play-check.mjs com.xenvaultinteractive.ferry
+      - name: Next build number
+        if: ${{ !cancelled() }}
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: node scripts/android-version-code.mjs

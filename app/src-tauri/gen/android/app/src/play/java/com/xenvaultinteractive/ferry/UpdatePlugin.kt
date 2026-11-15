@@ -144,6 +144,9 @@ class UpdatePlugin(private val activity: Activity) : Plugin(activity) {
         put("readyVersion", code?.let(::versionName))
     }
 
-    /** Tauri's version codes are major * 1,000,000 + minor * 1,000 + patch. */
-    private fun versionName(code: Int) = "${code / 1_000_000}.${code / 1_000 % 1_000}.${code % 1_000}"
+    /**
+     * Play only reports the build number (a counter both channels share; see
+     * scripts/android-version-code.mjs), not the version, so the update is named by it.
+     */
+    private fun versionName(code: Int) = "build $code"
 }
