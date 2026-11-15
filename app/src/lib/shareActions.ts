@@ -17,6 +17,15 @@ export async function copyLink(share: ShareInfo) {
   }
 }
 
+/** Phones: hand the link to a messenger, email or any app through the share sheet. */
+export async function sendLink(share: ShareInfo) {
+  try {
+    await api.shareLink(share.id);
+  } catch (err) {
+    toast(`Couldn't share the link: ${message(err)}`, true);
+  }
+}
+
 const busy = new Set<string>();
 
 /** Turn a share off or on. Turning it off asks first only if someone is downloading. */

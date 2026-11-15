@@ -12,12 +12,18 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.webkit.MimeTypeMap
+import android.webkit.WebView
+import androidx.activity.result.ActivityResult
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
+import app.tauri.annotation.ActivityCallback
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
+import app.tauri.plugin.Channel
 import app.tauri.plugin.Invoke
+import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import java.io.File
@@ -47,14 +53,155 @@ class TransferArgs {
     var title: String = ""
     var text: String = ""
     var progress: Int? = null
+    /** Shares are on: add a "Stop sharing" button, and no progress bar while nothing moves. */
+    var sharing: Boolean = false
 }
 
-/** Called from Ferry's Rust code only; see `plugins/ferry-mobile/src/lib.rs`. */
+@InvokeArg
+class WatchArgs {
+    lateinit var channel: Channel
+}
+
+@InvokeArg
+class StageArgs {
+    lateinit var uris: Array<String>
+    lateinit var dest: String
+}
+
+@InvokeArg
+class TextArgs {
+    lateinit var text: String
+    var title: String? = null
+}
+
+/**
+ * Called from Ferry's Rust code only; see `plugins/ferry-mobile/src/lib.rs`. Things that happen
+ * on Android's side (files shared to Ferry, the notification's Stop button, copy progress) go
+ * back to Rust through the channel it passes to [watch].
+ */
 @TauriPlugin
 class FerryMobilePlugin(private val activity: Activity) : Plugin(activity) {
     /** File copies run here, off the main thread, one at a time. */
     private val io = Executors.newSingleThreadExecutor()
+    /** Copies of picked or shared files, kept apart so they don't wait behind saves. */
+    private val staging = Executors.newSingleThreadExecutor()
     private var askedForNotifications = false
+    private var events: Channel? = null
+    /** Files shared to Ferry before Rust started listening. */
+    private val pendingShared = mutableListOf<List<String>>()
+
+    override fun load(webView: WebView) {
+        super.load(webView)
+        takeShared(activity.intent)
+        TransferService.onAction = { action -> emit(JSObject().put("type", action)) }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        takeShared(intent)
+    }
+
+    /** Files from another app's Share menu ("Share → Ferry"). */
+    private fun takeShared(intent: Intent?) {
+        if (intent == null) return
+        val uris = when (intent.action) {
+            Intent.ACTION_SEND ->
+                listOfNotNull(IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java))
+            Intent.ACTION_SEND_MULTIPLE ->
+                IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+            else -> return
+        }
+        // Handled once, even if the activity is recreated with the same intent.
+        intent.action = Intent.ACTION_MAIN
+        if (uris.isEmpty()) {
+            emit(JSObject().put("type", "sharedNothing"))
+            return
+        }
+        val strings = uris.map(Uri::toString)
+        synchronized(pendingShared) {
+            if (events == null) {
+                pendingShared += strings
+                return
+            }
+        }
+        emitShared(strings)
+    }
+
+    private fun emitShared(uris: List<String>) {
+        emit(JSObject().put("type", "shared").put("uris", JSArray(uris)))
+    }
+
+    private fun emit(event: JSObject) {
+        events?.send(event)
+    }
+
+    /** Rust's event channel; files shared before it was set are delivered now. */
+    @Command
+    fun watch(invoke: Invoke) {
+        val pending = synchronized(pendingShared) {
+            events = invoke.parseArgs(WatchArgs::class.java).channel
+            pendingShared.toList().also { pendingShared.clear() }
+        }
+        pending.forEach(::emitShared)
+        invoke.resolve()
+    }
+
+    /** Let the user pick files to share. Resolves with their URIs; none if they cancel. */
+    @Command
+    fun pickFiles(invoke: Invoke) {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            .addCategory(Intent.CATEGORY_OPENABLE)
+            .setType("*/*")
+            .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+        startActivityForResult(invoke, intent, "picked")
+    }
+
+    /** Let the user pick a folder to share. */
+    @Command
+    fun pickFolder(invoke: Invoke) {
+        startActivityForResult(invoke, Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), "picked")
+    }
+
+    @ActivityCallback
+    fun picked(invoke: Invoke, result: ActivityResult) {
+        val data = result.data
+        val uris = mutableListOf<String>()
+        if (result.resultCode == Activity.RESULT_OK && data != null) {
+            val clip = data.clipData
+            if (clip != null) {
+                for (i in 0 until clip.itemCount) clip.getItemAt(i).uri?.let { uris += it.toString() }
+            } else {
+                data.data?.let { uris += it.toString() }
+            }
+        }
+        invoke.resolve(JSObject().put("uris", JSArray(uris)))
+    }
+
+    /** Copy picked or shared items into `dest`, reporting progress on the event channel. */
+    @Command
+    fun stage(invoke: Invoke) {
+        val args = invoke.parseArgs(StageArgs::class.java)
+        staging.execute {
+            try {
+                val result = Staging(activity).copy(args.uris.map(Uri::parse), File(args.dest)) { done, total ->
+                    emit(JSObject().put("type", "stageProgress").put("doneBytes", done).put("totalBytes", total))
+                }
+                invoke.resolve(JSObject().put("paths", JSArray(result.paths)).put("skipped", result.skipped))
+            } catch (e: Exception) {
+                invoke.reject(e.message ?: "Couldn't copy the files to share")
+            }
+        }
+    }
+
+    /** Offer a text, such as a share link, to other apps through the share sheet. */
+    @Command
+    fun shareText(invoke: Invoke) {
+        val args = invoke.parseArgs(TextArgs::class.java)
+        val send = Intent(Intent.ACTION_SEND)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_TEXT, args.text)
+        args.title?.let { send.putExtra(Intent.EXTRA_SUBJECT, it) }
+        start(invoke, Intent.createChooser(send, args.title), "No app on this phone can share the link")
+    }
 
     /** Copy a received file into the shared Downloads collection. */
     @Command
@@ -145,7 +292,7 @@ class FerryMobilePlugin(private val activity: Activity) : Plugin(activity) {
         try {
             if (args.active) {
                 askForNotifications()
-                TransferService.show(activity, args.title, args.text, args.progress)
+                TransferService.show(activity, args.title, args.text, args.progress, args.sharing)
             } else {
                 TransferService.stop(activity)
             }

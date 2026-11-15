@@ -29,5 +29,7 @@ kotlin {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.16.0")
+    // ActivityResult for the file pickers; the same version the app itself uses.
+    implementation("androidx.activity:activity-ktx:1.10.1")
     implementation(project(":tauri-android"))
 }

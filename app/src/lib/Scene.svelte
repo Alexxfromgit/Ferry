@@ -5,11 +5,11 @@
 </script>
 
 <script lang="ts">
-  let { mode }: { mode: SceneMode } = $props();
+  let { mode, phone = false }: { mode: SceneMode; phone?: boolean } = $props();
 </script>
 
 <!-- The mascot in her chair, bottom right, fading into the neon streaks behind the glass. -->
-<div class="scene" data-mode={mode} aria-hidden="true">
+<div class="scene" class:phone data-mode={mode} aria-hidden="true">
   <img src="/art/scene-portrait.webp" alt="" decoding="async" />
 </div>
 
@@ -40,6 +40,26 @@
     /* So does the top, where headings run across it. */
     -webkit-mask-image: linear-gradient(to bottom, transparent, #000 30%);
     mask-image: linear-gradient(to bottom, transparent, #000 30%);
+  }
+
+  /* Phones: the portrait scene fits a phone's shape, so she is shown whole, across the full
+     width and resting on the tab bar. Only the empty top fades, behind the headings. */
+  .scene.phone {
+    left: 0;
+    top: 0;
+    bottom: calc(3.9rem + env(safe-area-inset-bottom));
+    width: auto;
+    height: auto;
+    max-width: none;
+    aspect-ratio: auto;
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
+  .scene.phone img {
+    object-position: center bottom;
+    -webkit-mask-image: linear-gradient(to bottom, transparent, #000 45%);
+    mask-image: linear-gradient(to bottom, transparent, #000 45%);
   }
 
   .scene[data-mode="ambient"] {

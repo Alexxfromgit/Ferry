@@ -1,4 +1,7 @@
 <resources>
     <string name="ferry_transfers_channel">Transfers</string>
-    <string name="ferry_transfers_channel_description">Progress of files Ferry is receiving</string>
+    <string name="ferry_transfers_channel_description">Files Ferry is sending or receiving</string>
+    <string name="ferry_stop_sharing">Stop sharing</string>
+    <string name="ferry_timeout_title">Ferry stopped sharing</string>
+    <string name="ferry_timeout_text">Android allows background transfers for about six hours a day. Open Ferry to share again.</string>
 </resources>

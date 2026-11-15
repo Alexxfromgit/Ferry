@@ -98,9 +98,16 @@ use `https://that-name` in Ferry. Use an `iroh-relay` version matching the iroh 
   ticket's addresses, but there is no "nearby devices" list.
 - **Windows firewall** may ask about network access on first start. Allowing it on private
   networks is enough for most cases.
-- **Android receives only.** Phones download into Ferry's own storage, then copy the files to
-  Downloads/Ferry. A notification shows while a transfer runs; it keeps Ferry connected with the
-  screen off. Sending from a phone, and iOS, come later.
+- **On Android, Ferry works with copies.** Phones download into Ferry's own storage, then copy
+  the files to Downloads/Ferry. To send, Ferry first copies the picked files (or files shared to
+  it from another app's Share menu) into its own storage, because Android only lends them to
+  the app for a while; the copy is deleted when the share is removed. Sharing from a phone
+  needs that much free space.
+- **Phones stay reachable through a notification.** While a transfer runs or a share is on, a
+  notification keeps Ferry connected with the screen off; its **Stop sharing** button turns all
+  shares off. Android 15 allows this for about six hours a day. When the time is up, Ferry turns
+  its shares off and says so; opening Ferry and turning them on again resets the limit. iOS
+  comes later.
 
 ## Where data lives
 

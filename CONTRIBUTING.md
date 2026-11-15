@@ -52,7 +52,7 @@ uses (see below); without one it keeps the Android list already in the file.
 ## Android
 
 The Android app is the same Tauri app (`app/src-tauri`) with its Android Studio project in
-`app/src-tauri/gen/android`. Phones receive only for now. You need Android Studio's SDK with
+`app/src-tauri/gen/android`. Phones send and receive. You need Android Studio's SDK with
 an NDK, JDK 21 (this Gradle version doesn't run on newer JDKs), and the Rust Android targets,
 which `npm --prefix app run tauri android init` installs. Set `JAVA_HOME` to the JDK 21 and
 `NDK_HOME` to the NDK folder, then:
@@ -73,9 +73,12 @@ Ferry ships two Android builds from one project, chosen with the Gradle property
 | Channel code | `gen/android/app/src/play` | `gen/android/app/src/direct` |
 
 The Rust side reads the channel as `env!("FERRY_DISTRIBUTION")`. Phone-only Rust lives in
-`app/src-tauri/src/android.rs` (saving to Downloads/Ferry, the transfer notification) and
-`android_updates.rs`. Their Kotlin halves are the `ferry-mobile` plugin in
-`app/src-tauri/plugins/ferry-mobile` and `UpdatePlugin` in each channel folder.
+`app/src-tauri/src/android.rs` (saving to Downloads/Ferry, the transfer notification),
+`android_send.rs` (copying picked or shared files into Ferry and sharing them, the notification's
+Stop button) and `android_updates.rs`. Their Kotlin halves are the `ferry-mobile` plugin in
+`app/src-tauri/plugins/ferry-mobile` and `UpdatePlugin` in each channel folder. The plugin
+reports Android's side (Share menu, Stop button, copy progress) through a channel Rust passes
+to its `watch` command at startup.
 Release signing reads `gen/android/keystore.properties` (gitignored) or environment variables;
 see [Releasing](docs/RELEASING.md#android). CI builds both channels as debug APKs and checks
 them with `scripts/android-release.mjs`, whose tests run with `node --test "scripts/*.test.mjs"`.
