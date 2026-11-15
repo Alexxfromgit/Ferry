@@ -2,7 +2,7 @@
   import { ask } from "@tauri-apps/plugin-dialog";
   import { api, message } from "./api";
   import { bytes, duration, shortId } from "./format";
-  import { toast } from "./store.svelte";
+  import { app, isMobile, toast } from "./store.svelte";
   import type { DownloadInfo } from "./types";
 
   let { download }: { download: DownloadInfo } = $props();
@@ -12,6 +12,10 @@
   );
 
   const title = $derived(download.name || `Share ${shortId(download.id)}`);
+
+  /** Phones: where the files went once copied out of Ferry into Downloads. */
+  const saved = $derived(app.saved[download.id]);
+  const savedFiles = $derived(saved?.state === "saved" ? saved.files.length : 0);
 
   const detail = $derived.by(() => {
     const d = download;
@@ -23,6 +27,11 @@
       case "exporting":
         return "Saving files…";
       case "completed":
+        if (isMobile()) {
+          if (saved?.state === "saved") return `${bytes(d.totalBytes)} · ${saved.location.replace(/^Download\//, "Downloads/")}`;
+          if (saved?.state === "failed") return `Couldn't save to Downloads: ${saved.error}`;
+          return "Saving to Downloads…";
+        }
         return `${bytes(d.totalBytes)}, saved`;
       case "paused":
         return d.totalBytes > 0 ? `Paused at ${bytes(d.doneBytes)} of ${bytes(d.totalBytes)}` : "Paused";
@@ -95,7 +104,7 @@
       </div>
     {/if}
     <div class="info">
-      <p class="detail" class:error={download.status === "failed"}>{detail}</p>
+      <p class="detail" class:error={download.status === "failed" || saved?.state === "failed"}>{detail}</p>
       {#if rate}<p class="rate">{rate}</p>{/if}
     </div>
   </div>
@@ -107,6 +116,15 @@
       <button onclick={() => act(() => api.resumeDownload(download.id), "Couldn't resume")}>
         {download.status === "failed" ? "Try again" : "Resume"}
       </button>
+    {:else if download.status === "completed" && isMobile()}
+      {#if saved?.state === "saved"}
+        <button onclick={() => act(() => api.openDownload(download.id), "Couldn't open it")}>
+          {savedFiles === 1 ? "Open" : "Show"}
+        </button>
+        <button onclick={() => act(() => api.shareDownload(download.id), "Couldn't share it")}>Share</button>
+      {:else if saved?.state === "failed"}
+        <button onclick={() => act(() => api.retrySave(download.id), "Couldn't save it")}>Try again</button>
+      {/if}
     {:else if download.status === "completed" && download.savedPath}
       <button onclick={() => act(() => api.revealDownload(download.id), "Couldn't open the folder")}>
         Show in folder
@@ -209,6 +227,24 @@
     display: flex;
     gap: 0.4rem;
     flex: none;
+  }
+
+  /* Narrow screens: actions get their own line under the progress. */
+  @media (max-width: 600px) {
+    .row {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.6rem;
+    }
+
+    .info {
+      flex-direction: column;
+      gap: 0.15rem;
+    }
+
+    .actions {
+      justify-content: flex-end;
+    }
   }
 
   [data-status="paused"] .bar > :global(span) {

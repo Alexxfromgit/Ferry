@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { DownloadInfo, NodeStatus, Preview, Settings, ShareInfo, UpdateInfo } from "./types";
+import type { AppInfo, DownloadInfo, NodeStatus, Preview, SaveState, Settings, ShareInfo, UpdateInfo } from "./types";
 
 type IncomingShare = { kind: "link"; link: string } | { kind: "file"; path: string };
 type OpenedTicket = { kind: "ready"; link: string } | { kind: "passwordRequired" };
@@ -33,6 +33,12 @@ export const api = {
   checkForUpdates: (automatic: boolean) => invoke<string | null>("check_for_updates", { automatic }),
   installUpdate: () => invoke<void>("install_update"),
   takePendingLinks: () => invoke<IncomingShare[]>("take_pending_links"),
+  appInfo: () => invoke<AppInfo>("app_info"),
+  // Android only: received files are copied into Downloads/Ferry.
+  savedDownloads: () => invoke<Record<string, SaveState>>("saved_downloads"),
+  openDownload: (id: string) => invoke<void>("open_download", { id }),
+  shareDownload: (id: string) => invoke<void>("share_download", { id }),
+  retrySave: (id: string) => invoke<void>("retry_save", { id }),
   openProjectPage: () => invoke<void>("open_project_page"),
   openThirdPartyNotices: () => invoke<void>("open_third_party_notices"),
 };

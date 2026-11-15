@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { fade } from "svelte/transition";
-  import { activeDownloadCount, app, init, receive, toast, type View } from "./lib/store.svelte";
+  import { activeDownloadCount, app, init, isMobile, receive, toast, type View } from "./lib/store.svelte";
   import { compactCount, exactCount } from "./lib/format";
   import { message } from "./lib/api";
   import SendView from "./lib/SendView.svelte";
@@ -37,11 +37,13 @@
     return "ambient";
   });
 
-  const tabs: { id: View; label: string }[] = [
+  const allTabs: { id: View; label: string }[] = [
     { id: "send", label: "Send" },
     { id: "receive", label: "Receive" },
     { id: "settings", label: "Settings" },
   ];
+  // Phones receive only for now.
+  const tabs = $derived(isMobile() ? allTabs.filter((tab) => tab.id !== "send") : allTabs);
 
   /** What each tab's badge counts, with the words for its tooltip and screen readers. */
   const badges = $derived<Record<View, { n: number; one: string; many: string }>>({
@@ -98,7 +100,7 @@
   <Scene mode={sceneMode} />
 {/if}
 
-<div class="shell">
+<div class="shell" class:phone={isMobile()}>
   <nav class="glass" aria-label="Main">
     <div class="brand">
       <img src="/ferry-icon.png" alt="" width="40" height="40" />
@@ -377,6 +379,71 @@
   .toast.error {
     border-color: rgb(255 107 107 / 0.6);
     color: #ffd9d9;
+  }
+
+  /* Phones: content on top and tabs along the bottom, within reach of a thumb, both clear of
+     the status bar and the gesture bar (the app draws edge to edge). */
+  .shell.phone {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr auto;
+  }
+
+  .shell.phone nav {
+    order: 2;
+    flex-direction: row;
+    gap: 0;
+    padding: 0.4rem 0.75rem calc(0.4rem + env(safe-area-inset-bottom));
+    border-width: 1px 0 0 0;
+  }
+
+  .shell.phone .brand,
+  .shell.phone .reach {
+    display: none;
+  }
+
+  .shell.phone ul {
+    display: flex;
+    flex: 1;
+    gap: 0.4rem;
+  }
+
+  .shell.phone li {
+    flex: 1;
+  }
+
+  .shell.phone .tab {
+    justify-content: center;
+    min-height: 3rem;
+  }
+
+  .shell.phone .tab.active {
+    background: var(--magenta-soft);
+    box-shadow: inset 0 2px 0 var(--magenta);
+  }
+
+  .shell.phone main {
+    padding: calc(1.25rem + env(safe-area-inset-top)) 1rem 1.5rem;
+  }
+
+  /* A backdrop for the status bar, so scrolled content doesn't run under its icons. */
+  .shell.phone::before {
+    content: "";
+    position: fixed;
+    inset: 0 0 auto;
+    height: env(safe-area-inset-top);
+    z-index: 3;
+    background: rgb(8 6 11 / 0.82);
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+    pointer-events: none;
+  }
+
+  .shell.phone :global(h1) {
+    font-size: var(--t-xl);
+  }
+
+  .shell.phone .toast {
+    bottom: calc(5rem + env(safe-area-inset-bottom));
   }
 
   @media (max-width: 820px) {

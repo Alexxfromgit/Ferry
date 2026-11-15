@@ -104,9 +104,22 @@ export interface Settings {
   showArtwork: boolean;
 }
 
+export interface AppInfo {
+  platform: string;
+  mobile: boolean;
+  distribution: "desktop" | "play" | "direct" | "appstore";
+}
+
+/** On phones: what became of a completed download's files (copied into Downloads/Ferry). */
+export type SaveState =
+  | { state: "saving" }
+  | { state: "saved"; location: string; files: { uri: string; name: string }[] }
+  | { state: "failed"; error: string };
+
 export interface UpdateInfo {
   version: string;
-  support: "available" | "packageManager" | "unavailable";
+  /** `store`: Google Play delivers updates (Android Play build). */
+  support: "available" | "store" | "packageManager" | "unavailable";
   autoCheck: boolean;
   readyVersion: string | null;
 }

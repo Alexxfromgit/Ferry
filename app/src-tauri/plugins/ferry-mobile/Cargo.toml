@@ -1,0 +1,16 @@
+[package]
+name = "tauri-plugin-ferry-mobile"
+description = "Ferry's phone integration: saving to Downloads, opening and sharing files, transfer notifications"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+links = "tauri-plugin-ferry-mobile"
+
+[dependencies]
+serde.workspace = true
+tauri = "2.12"
+
+[build-dependencies]
+tauri-plugin = { version = "2.7", features = ["build"] }

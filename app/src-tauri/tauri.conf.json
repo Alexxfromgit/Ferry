@@ -45,7 +45,8 @@
         "name": "Ferry share",
         "description": "Ferry share file",
         "role": "Viewer",
-        "mimeType": "application/x-ferry"
+        "mimeType": "application/x-ferry",
+        "androidIntentActionFilters": ["view"]
       }
     ],
     "shortDescription": "Share files directly with anyone, anywhere",
@@ -105,6 +106,19 @@
       "requireSignedVersion": true
     },
     "deep-link": {
+      "mobile": [
+        {
+          "scheme": ["https"],
+          "host": "ferry.xenvaultinteractive.com",
+          "pathPrefix": ["/get"],
+          "appLink": true
+        },
+        {
+          "scheme": ["ferry"],
+          "host": "get",
+          "appLink": false
+        }
+      ],
       "desktop": {
         "schemes": [
           "ferry"

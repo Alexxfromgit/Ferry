@@ -70,8 +70,14 @@ impl TicketFile {
         ensure!(path.metadata()?.is_file(), "Choose a Ferry ticket file");
         let file = File::open(path)?;
         ensure!(file.metadata()?.is_file(), "Choose a Ferry ticket file");
+        Self::read_from(file)
+    }
+
+    /// Read a ticket from an open stream, such as one picked through a mobile document picker
+    /// that hands out content URIs rather than paths. The read is bounded.
+    pub fn read_from(reader: impl Read) -> anyhow::Result<Self> {
         let mut bytes = Vec::new();
-        file.take(MAX_FILE as u64 + 1).read_to_end(&mut bytes)?;
+        reader.take(MAX_FILE as u64 + 1).read_to_end(&mut bytes)?;
         Self::decode(bytes)
     }
 

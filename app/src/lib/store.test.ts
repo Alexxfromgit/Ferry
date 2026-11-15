@@ -68,6 +68,7 @@ beforeEach(() => {
     list_downloads: () => [],
     node_status: () => ({ nodeId: "n", directAddresses: [] }),
     take_pending_links: () => [],
+    app_info: () => ({ platform: "linux", mobile: false, distribution: "desktop" }),
     get_settings: () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: true }),
   };
   invoke.mockReset();
@@ -192,6 +193,35 @@ describe("updates", () => {
 
     await checkForUpdates();
     expect(invoke).toHaveBeenCalledWith("check_for_updates", { automatic: false });
+    expect(updates.info?.readyVersion).toBe("0.2.0");
+    stop();
+  });
+
+  it("on phones, waits for saves and offers the update again after the installer", async () => {
+    backend.app_info = () => ({ platform: "android", mobile: true, distribution: "direct" });
+    backend.saved_downloads = () => ({ d1: { state: "saving" } });
+    backend.update_info = () => ({
+      version: "0.1.0",
+      support: "available",
+      autoCheck: false,
+      readyVersion: "0.2.0",
+    });
+    backend.install_update = () => null;
+    const { app } = await freshStore();
+    const { initUpdates, restartToUpdate, transferring, updates } = await import("./updates.svelte");
+    const stop = initUpdates();
+    await vi.waitFor(() => expect(updates.info?.readyVersion).toBe("0.2.0"));
+
+    // Copying into Downloads is work an update would cut off.
+    expect(transferring()).toBe(true);
+    await restartToUpdate();
+    expect(invoke).not.toHaveBeenCalledWith("install_update");
+
+    app.saved = {};
+    await restartToUpdate();
+    expect(invoke).toHaveBeenCalledWith("install_update");
+    // Android's installer opened; if the user backs out, Ferry offers it again.
+    expect(updates.installing).toBe(false);
     expect(updates.info?.readyVersion).toBe("0.2.0");
     stop();
   });

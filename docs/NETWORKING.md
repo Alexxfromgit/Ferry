@@ -98,7 +98,9 @@ use `https://that-name` in Ferry. Use an `iroh-relay` version matching the iroh 
   ticket's addresses, but there is no "nearby devices" list.
 - **Windows firewall** may ask about network access on first start. Allowing it on private
   networks is enough for most cases.
-- **Mobile:** Android is planned.
+- **Android receives only.** Phones download into Ferry's own storage, then copy the files to
+  Downloads/Ferry. A notification shows while a transfer runs; it keeps Ferry connected with the
+  screen off. Sending from a phone, and iOS, come later.
 
 ## Where data lives
 

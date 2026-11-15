@@ -41,10 +41,46 @@ set `$env:UPDATE_CONTRACT = '1'` before running that test and clear it afterward
 `app/src/lib/types.ts` as needed and run the frontend type check.
 
 When changing the app or ticket icon, update its source under `app/src-tauri/icons/` and run
-`pwsh -File scripts/make-icons.ps1` on Windows. When changing the mascot artwork, update its
+`pwsh -File scripts/make-icons.ps1` on Windows. It also writes the iOS icons and the Android
+adaptive icon, and copies the Android set into `app/src-tauri/gen/android`. When changing the mascot artwork, update its
 source under `branding/art/` and run `python3 scripts/make-art.py` (needs Pillow with WebP
 support). It writes the in-app images and the installer images. After dependency updates, regenerate
 `THIRD_PARTY_NOTICES.md` with `node scripts/third-party-notices.mjs` after installing the app dependencies.
+It lists the Android libraries through Gradle, so set `JAVA_HOME` to the JDK the Android build
+uses (see below); without one it keeps the Android list already in the file.
+
+## Android
+
+The Android app is the same Tauri app (`app/src-tauri`) with its Android Studio project in
+`app/src-tauri/gen/android`. Phones receive only for now. You need Android Studio's SDK with
+an NDK, JDK 21 (this Gradle version doesn't run on newer JDKs), and the Rust Android targets,
+which `npm --prefix app run tauri android init` installs. Set `JAVA_HOME` to the JDK 21 and
+`NDK_HOME` to the NDK folder, then:
+
+```sh
+npm --prefix app run tauri android dev                                   # on a connected phone
+npm --prefix app run tauri android build -- --debug --apk --target aarch64
+```
+
+Ferry ships two Android builds from one project, chosen with the Gradle property `ferryDist`
+(set `ORG_GRADLE_PROJECT_ferryDist=play` or `direct`):
+
+| | `play` (default) | `direct` |
+| --- | --- | --- |
+| Package | `com.xenvaultinteractive.ferry` | `com.xenvaultinteractive.ferry.direct` |
+| Ships through | Google Play | GitHub releases and ferry.xenvaultinteractive.com |
+| Updates | Play in-app updates | `latest.json` on downloads.xenvaultinteractive.com |
+| Channel code | `gen/android/app/src/play` | `gen/android/app/src/direct` |
+
+The Rust side reads the channel as `env!("FERRY_DISTRIBUTION")`. Phone-only Rust lives in
+`app/src-tauri/src/android.rs` (saving to Downloads/Ferry, the transfer notification) and
+`android_updates.rs`. Their Kotlin halves are the `ferry-mobile` plugin in
+`app/src-tauri/plugins/ferry-mobile` and `UpdatePlugin` in each channel folder.
+Release signing reads `gen/android/keystore.properties` (gitignored) or environment variables;
+see `gen/android/app/build.gradle.kts`.
+
+To preview the phone layout in a browser, run `npm --prefix app run dev` and open
+`http://localhost:1420/?mobile` with the browser's device toolbar.
 
 ## macOS smoke test
 

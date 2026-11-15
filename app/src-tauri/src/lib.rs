@@ -5,6 +5,11 @@
 //! file manager, or a second app launch) are queued and announced with `ferry-open-link`. When
 //! the UI may have missed events, `ferry-resync` tells it to reload its lists.
 
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(target_os = "android")]
+mod android_updates;
+mod phone;
 #[cfg(desktop)]
 mod updates;
 
@@ -191,13 +196,31 @@ fn share_qr(state: State<'_, AppState>, id: String) -> CmdResult<String> {
         .build())
 }
 
-/// Read a `.ferry` file opened from the desktop, picker, or drop handler.
+/// Read a `.ferry` file opened from the desktop, picker, or drop handler. On phones the picker
+/// hands out `content://` URIs instead of paths.
 #[tauri::command]
-async fn read_share_file(path: PathBuf, password: Option<String>) -> CmdResult<OpenedTicket> {
+#[cfg_attr(desktop, allow(unused_variables))]
+async fn read_share_file(
+    app: AppHandle,
+    path: PathBuf,
+    password: Option<String>,
+) -> CmdResult<OpenedTicket> {
     let password = password.map(|value| TicketPassword::from(value.into_boxed_str()));
-    tauri::async_runtime::spawn_blocking(move || read_share_file_checked(&path, password))
-        .await
-        .map_err(fail)?
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(mobile)]
+        if let Some(url) = path
+            .to_str()
+            .filter(|p| p.starts_with("content://"))
+            .and_then(|p| tauri::Url::parse(p).ok())
+        {
+            use tauri_plugin_fs::{FsExt, OpenOptions};
+            let file = app.fs().open(url, OpenOptions::new()).map_err(fail)?;
+            return opened_ticket(TicketFile::read_from(file).map_err(fail)?, password);
+        }
+        read_share_file_checked(&path, password)
+    })
+    .await
+    .map_err(fail)?
 }
 
 fn read_share_file_checked(
@@ -207,7 +230,11 @@ fn read_share_file_checked(
     if !has_ticket_extension(path) {
         return Err("That is not a Ferry ticket file (.ferry).".into());
     }
-    let link = match (TicketFile::read(path).map_err(fail)?, password) {
+    opened_ticket(TicketFile::read(path).map_err(fail)?, password)
+}
+
+fn opened_ticket(ticket: TicketFile, password: Option<TicketPassword>) -> CmdResult<OpenedTicket> {
+    let link = match (ticket, password) {
         (TicketFile::Ready(link), None) => link,
         (TicketFile::Protected(_), None) => return Ok(OpenedTicket::PasswordRequired),
         (TicketFile::Protected(ticket), Some(password)) => ticket.unlock(password).map_err(fail)?,
@@ -288,6 +315,10 @@ fn set_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult
     validate_settings(&settings)?;
     let mut saved = state.settings.lock().unwrap();
     settings.auto_check_updates = saved.auto_check_updates;
+    // Phones download into app storage and then save into the shared Downloads collection.
+    if cfg!(mobile) {
+        settings.download_dir = saved.download_dir.clone();
+    }
     save_settings(&state.settings_path, &settings)?;
     let restart = settings.relay != *state.node.relay();
     *saved = settings;
@@ -301,9 +332,19 @@ fn open_project_page(app: AppHandle) -> CmdResult<()> {
         .map_err(fail)
 }
 
-/// Opens the bundled third-party notices, or shows the file if nothing opens Markdown.
+/// Opens the bundled third-party notices, or shows the file if nothing opens Markdown. Phones
+/// have no file to show, so they open this version's notices on GitHub.
 #[tauri::command]
 fn open_third_party_notices(app: AppHandle) -> CmdResult<()> {
+    #[cfg(mobile)]
+    {
+        let url = format!(
+            "{PROJECT_PAGE}/blob/v{}/THIRD_PARTY_NOTICES.md",
+            app.package_info().version
+        );
+        return app.opener().open_url(url, None::<&str>).map_err(fail);
+    }
+    #[cfg_attr(mobile, allow(unreachable_code))]
     let path = app
         .path()
         .resolve("THIRD_PARTY_NOTICES.md", BaseDirectory::Resource)
@@ -312,6 +353,26 @@ fn open_third_party_notices(app: AppHandle) -> CmdResult<()> {
         .open_path(path.to_string_lossy(), None::<&str>)
         .or_else(|_| app.opener().reveal_item_in_dir(&path))
         .map_err(fail)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppInfo {
+    /// `windows`, `macos`, `linux`, `android` or `ios`.
+    platform: &'static str,
+    mobile: bool,
+    /// How this build is distributed and updated: `desktop`, `play`, `direct` or `appstore`.
+    distribution: &'static str,
+}
+
+/// What kind of Ferry this is, so the UI can adapt without probing the OS.
+#[tauri::command]
+fn app_info() -> AppInfo {
+    AppInfo {
+        platform: std::env::consts::OS,
+        mobile: cfg!(mobile),
+        distribution: env!("FERRY_DISTRIBUTION"),
+    }
 }
 
 /// Links that arrived from outside (deep link, opened file, second launch) since last asked.
@@ -332,6 +393,13 @@ fn link_from_arg(arg: &str) -> Option<IncomingShare> {
     if ferry_core::is_share_url(arg) {
         return Some(IncomingShare::Link {
             link: arg.trim().to_string(),
+        });
+    }
+    // "Open with Ferry" on a phone hands over a content URI; reading it checks the format.
+    #[cfg(mobile)]
+    if arg.trim().starts_with("content://") {
+        return Some(IncomingShare::File {
+            path: PathBuf::from(arg.trim()),
         });
     }
     let path = Path::new(arg);
@@ -369,6 +437,8 @@ fn forward_events(app: AppHandle, node: &Node) {
         loop {
             match rx.recv().await {
                 Ok(event) => {
+                    #[cfg(target_os = "android")]
+                    android::on_event(&app, &event);
                     if let Event::DownloadUpdated { download } = &event
                         && download.status == DownloadStatus::Completed
                     {
@@ -383,6 +453,9 @@ fn forward_events(app: AppHandle, node: &Node) {
                 }
                 // Some events were missed: have the UI reload its lists.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                    // The phone side catches up too: the notification and pending saves.
+                    #[cfg(target_os = "android")]
+                    android::resume(&app, false);
                     app.emit(RESYNC, ()).ok();
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -648,11 +721,22 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let config_dir = app.path().app_data_dir()?;
     std::fs::create_dir_all(&config_dir)?;
     let settings_path = config_dir.join("settings.json");
-    let default_downloads = app
-        .path()
-        .download_dir()
-        .unwrap_or_else(|_| config_dir.join("Downloads"));
-    let settings = load_settings(&settings_path, default_downloads);
+    #[cfg(desktop)]
+    let settings = {
+        let default_downloads = app
+            .path()
+            .download_dir()
+            .unwrap_or_else(|_| config_dir.join("Downloads"));
+        load_settings(&settings_path, default_downloads)
+    };
+    // Phones download into app storage, then hand finished files to the shared Downloads.
+    #[cfg(mobile)]
+    let settings = {
+        let incoming = app.path().app_local_data_dir()?.join("incoming");
+        let mut settings = load_settings(&settings_path, incoming.clone());
+        settings.download_dir = incoming;
+        settings
+    };
 
     let mut config = Config::new(node_dir(app)?);
     config.relay = settings.relay.clone();
@@ -682,6 +766,11 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         settings_path,
         pending_links: Mutex::new(Vec::new()),
     });
+    #[cfg(target_os = "android")]
+    {
+        app.manage(android::Phone::load(config_dir.join("saved.json")));
+        android::start(app.handle());
+    }
 
     #[cfg(desktop)]
     build_tray(app)?;
@@ -738,7 +827,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_clipboard_manager::init());
+    #[cfg(mobile)]
+    let app = app
+        .plugin(tauri_plugin_barcode_scanner::init())
+        .plugin(tauri_plugin_fs::init());
+    #[cfg(target_os = "android")]
+    let app = app
+        .plugin(tauri_plugin_ferry_mobile::init())
+        .plugin(android_updates::init());
+    let app = app
         .setup(setup)
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
@@ -778,7 +876,24 @@ pub fn run() {
             updates::check_for_updates,
             #[cfg(desktop)]
             updates::install_update,
+            #[cfg(target_os = "android")]
+            android_updates::update_info,
+            #[cfg(target_os = "android")]
+            android_updates::set_auto_check_updates,
+            #[cfg(target_os = "android")]
+            android_updates::check_for_updates,
+            #[cfg(target_os = "android")]
+            android_updates::install_update,
             take_pending_links,
+            app_info,
+            #[cfg(target_os = "android")]
+            android::saved_downloads,
+            #[cfg(target_os = "android")]
+            android::open_download,
+            #[cfg(target_os = "android")]
+            android::share_download,
+            #[cfg(target_os = "android")]
+            android::retry_save,
             open_project_page,
             open_third_party_notices,
         ])

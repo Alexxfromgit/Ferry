@@ -1,0 +1,7 @@
+/src/main/**/generated
+/src/main/jniLibs/**/*.so
+# Copied in by the Tauri CLI on every build (config and bundle resources).
+/src/main/assets/
+/tauri.build.gradle.kts
+/proguard-tauri.pro
+/tauri.properties

@@ -3,7 +3,16 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, message } from "./api";
   import { bytes, exactCount, plural } from "./format";
-  import { activeDownloadCount, app, checkLink, clearPreview, openTicket, receive, startDownload } from "./store.svelte";
+  import {
+    activeDownloadCount,
+    app,
+    checkLink,
+    clearPreview,
+    isMobile,
+    openTicket,
+    receive,
+    startDownload,
+  } from "./store.svelte";
   import DownloadRow from "./DownloadRow.svelte";
 
   let settingsDir = $state("");
@@ -12,9 +21,41 @@
     api.getSettings().then((s) => (settingsDir = s.downloadDir));
   });
 
+  let scanning = $state(false);
+
+  /** Scan a share QR code with the phone camera, then check the link it holds. */
+  async function scanQr() {
+    if (scanning) return;
+    scanning = true;
+    try {
+      const { Format, checkPermissions, requestPermissions, scan } = await import(
+        "@tauri-apps/plugin-barcode-scanner"
+      );
+      let permission = await checkPermissions();
+      if (permission !== "granted" && permission !== "denied") permission = await requestPermissions();
+      if (permission !== "granted") {
+        receive.problem = {
+          title: "Ferry can't use the camera.",
+          detail: "Allow camera access for Ferry in your phone's settings, or paste the link instead.",
+        };
+        return;
+      }
+      const result = await scan({ windowed: false, formats: [Format.QRCode] });
+      receive.link = result.content;
+      await checkLink(result.content);
+    } catch (err) {
+      // Backing out of the scanner is not an error worth showing.
+      if (!/cancel/i.test(message(err))) receive.problem = { title: "Couldn't scan the code.", detail: message(err) };
+    } finally {
+      scanning = false;
+    }
+  }
+
   async function openTicketFile() {
     try {
-      const path = await open({ filters: [{ name: "Ferry ticket", extensions: ["ferry"] }] });
+      // Phone pickers don't know the .ferry extension, so they offer every file.
+      const filters = isMobile() ? [] : [{ name: "Ferry ticket", extensions: ["ferry"] }];
+      const path = await open({ filters });
       if (typeof path === "string") await openTicket(path);
     } catch (err) {
       receive.problem = { title: "Couldn't open the ticket file.", detail: message(err) };
@@ -44,7 +85,17 @@
 
 <section class="intake" aria-label="Open a ticket">
   <h1>Receive files someone sent you</h1>
-  <p class="muted lede">Paste the Ferry link you were sent, or open the ticket file.</p>
+  <p class="muted lede">
+    {isMobile()
+      ? "Scan the QR code on the sender's screen, paste the link you were sent, or open the ticket file."
+      : "Paste the Ferry link you were sent, or open the ticket file."}
+  </p>
+
+  {#if isMobile()}
+    <button class="primary scan" onclick={scanQr} disabled={scanning || receive.checking}>
+      {scanning ? "Opening camera…" : "Scan QR code"}
+    </button>
+  {/if}
 
   <form
     class="paste"
@@ -110,11 +161,13 @@
           <li class="muted">and {plural(preview.fileCount - shown.length, "more file")}</li>
         {/if}
       </ul>
-      <div class="dest">
-        <span class="muted">Save to</span>
-        <span class="code path" title={receive.dest ?? settingsDir}>{receive.dest ?? settingsDir}</span>
-        <button class="quiet" onclick={chooseDest}>Change</button>
-      </div>
+      {#if !isMobile()}
+        <div class="dest">
+          <span class="muted">Save to</span>
+          <span class="code path" title={receive.dest ?? settingsDir}>{receive.dest ?? settingsDir}</span>
+          <button class="quiet" onclick={chooseDest}>Change</button>
+        </div>
+      {/if}
       <div class="go">
         <button class="primary" onclick={startDownload} disabled={receive.starting}>
           {receive.starting ? "Starting…" : "Download"}
@@ -159,6 +212,13 @@
   .paste {
     display: flex;
     gap: 0.5rem;
+  }
+
+  .scan {
+    width: 100%;
+    min-height: 3.25rem;
+    margin-bottom: 0.75rem;
+    font-size: 1.05rem;
   }
 
   .paste input {
