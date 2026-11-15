@@ -29,7 +29,8 @@
         { "type": "json", "path": "app/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "app/package-lock.json", "jsonpath": "$.version" },
         { "type": "json", "path": "app/package-lock.json", "jsonpath": "$.packages[''].version" },
-        { "type": "json", "path": "app/src-tauri/tauri.conf.json", "jsonpath": "$.version" }
+        { "type": "json", "path": "app/src-tauri/tauri.conf.json", "jsonpath": "$.version" },
+        { "type": "generic", "path": "README.md" }
       ]
     }
   }
