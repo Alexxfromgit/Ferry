@@ -29,6 +29,17 @@
   const small = $derived(phone || android);
   const reduced = motion(1) === 0;
 
+  // The intro plays once per launch. A reload (F5 on desktop) shows a still frame only while
+  // Ferry is starting, like before the intro existed.
+  const PLAYED_KEY = "ferry-intro-played";
+  const replay = (() => {
+    try {
+      return sessionStorage.getItem(PLAYED_KEY) !== null;
+    } catch {
+      return false;
+    }
+  })();
+
   let started = $state(false);
   let held = $state(false);
 
@@ -36,7 +47,12 @@
   $effect(() => {
     if (started || artwork === null) return;
     started = true;
-    const hold = reduced ? STILL_HOLD : small ? PHONE_HOLD : DESKTOP_HOLD;
+    try {
+      sessionStorage.setItem(PLAYED_KEY, "1");
+    } catch {
+      // Without storage a reload just plays the intro again.
+    }
+    const hold = replay ? 0 : reduced ? STILL_HOLD : small ? PHONE_HOLD : DESKTOP_HOLD;
     setTimeout(() => {
       held = true;
       ondone();
@@ -52,9 +68,9 @@
   class="splash"
   class:artwork={artwork === true}
   class:phone={small}
-  class:go={started}
+  class:still={replay}
   style:--pace={small ? 1 : DESKTOP_PACE}
-  out:fade|global={{ duration: motion(360) }}
+  out:fade|global={{ duration: motion(replay ? 150 : 360) }}
 >
   {#if started}
     {#if artwork}
@@ -104,8 +120,8 @@
     object-position: 20% 85%;
     opacity: 0.92;
     animation:
-      art-in 650ms cubic-bezier(0, 0, 0.2, 1) both,
-      settle 2150ms cubic-bezier(0.4, 0, 0.2, 1) both;
+      art-in calc(650ms * var(--pace)) cubic-bezier(0, 0, 0.2, 1) both,
+      settle calc(2150ms * var(--pace)) cubic-bezier(0.4, 0, 0.2, 1) both;
   }
 
   .phone .art {
@@ -127,7 +143,12 @@
     position: absolute;
     inset: 0;
     background: radial-gradient(circle at 82% 22%, rgb(255 45 149 / 0.24), transparent 55%);
-    animation: art-in 1000ms cubic-bezier(0.4, 0, 0.2, 1) both;
+    animation: art-in calc(1000ms * var(--pace)) cubic-bezier(0.4, 0, 0.2, 1) both;
+  }
+
+  /* A reload: everything is already in place, nothing animates in. */
+  .still :is(.art, .glow, .icon, .mark, .rule, .tagline) {
+    animation: none;
   }
 
   .words {

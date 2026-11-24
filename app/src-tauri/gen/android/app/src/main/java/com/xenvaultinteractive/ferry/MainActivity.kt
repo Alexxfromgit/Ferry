@@ -2,17 +2,16 @@ package com.xenvaultinteractive.ferry
 
 import android.graphics.Color
 import android.os.Bundle
-import android.webkit.WebView
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
-import androidx.core.content.ContextCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     // The launch splash is the night background with no icon (Theme.ferry.Starting); the web UI
-    // draws the branded intro once it loads, so the two meet without a flash.
+    // draws the branded intro once it loads, so the two meet without a flash. The WebView is
+    // night until then too: Tauri applies tauri.conf.json's backgroundColor to it.
     installSplashScreen()
     // Ferry's UI is always dark, so the system bars keep light icons even in light mode.
     enableEdgeToEdge(
@@ -28,10 +27,5 @@ class MainActivity : TauriActivity() {
         moveTaskToBack(true)
       }
     })
-  }
-
-  // A WebView is white until its page paints; night instead, like the splash before it.
-  override fun onWebViewCreate(webView: WebView) {
-    webView.setBackgroundColor(ContextCompat.getColor(this, R.color.ferry_night))
   }
 }

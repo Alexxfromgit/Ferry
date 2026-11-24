@@ -427,13 +427,17 @@ fn accept_links(app: &AppHandle, args: impl IntoIterator<Item = String>) {
         state.pending_links.lock().unwrap().extend(links);
     }
     app.emit(OPEN_LINK, ()).ok();
-    show_main(app);
+    // A link that launched Ferry waits for the window to appear with its page (show_at_startup);
+    // later ones bring the window forward.
+    #[cfg(desktop)]
+    if STARTUP_SHOWN.load(std::sync::atomic::Ordering::SeqCst) {
+        show_main(app);
+    }
 }
 
-#[cfg_attr(mobile, allow(unused_variables))]
+// Mobile apps have a single window the OS brings forward.
+#[cfg(desktop)]
 fn show_main(app: &AppHandle) {
-    // Mobile apps have a single window the OS brings forward.
-    #[cfg(desktop)]
     if let Some(window) = app.get_webview_window("main") {
         window.show().ok();
         window.unminimize().ok();
