@@ -439,13 +439,16 @@ fn accept_links(app: &AppHandle, args: impl IntoIterator<Item = String>) {
 #[cfg(desktop)]
 fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        // Once the window has been shown (here by the tray or a second launch too), the startup
+        // reveal must not show it again: it may since have been closed to the tray.
+        STARTUP_SHOWN.store(true, std::sync::atomic::Ordering::SeqCst);
         window.show().ok();
         window.unminimize().ok();
         window.set_focus().ok();
     }
 }
 
-/// Set once the main window has been shown at startup.
+/// Set once the main window has been shown, at startup or by an earlier explicit open.
 #[cfg(desktop)]
 static STARTUP_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
