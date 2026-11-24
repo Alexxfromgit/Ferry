@@ -15,10 +15,12 @@
   let passwordProblem = $state("");
   let saving = $state(false);
 
-  // Re-fetch when the share changes or its link may have changed (relay connected).
+  // Re-fetch when the share changes or its link may have changed (relay connected, or the
+  // short link became available).
   $effect(() => {
     const id = share.id;
     void app.linkEpoch;
+    void share.link;
     api.shareQr(id).then((svg) => (qr = svg)).catch(() => (qr = null));
   });
 

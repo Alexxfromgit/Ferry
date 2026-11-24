@@ -38,8 +38,9 @@ Every release lists its checksums in `SHA256SUMS.txt` and carries GitHub build a
 - **Works across networks.** Ferry connects directly when it can; when a network blocks that, an
   encrypted relay passes the data along without being able to read it.
 - **Resumes.** An interrupted download picks up where it stopped.
-- **Share it your way.** A link, a QR code, or a `.ferry` ticket file. Links name your device
-  and the share, never your IP address.
+- **Share it your way.** A short link like `ferry.xenvaultinteractive.com/s/K7X2-QP9A-4MZT`, a
+  QR code, or a `.ferry` ticket file. Links name your device and the share, never your IP
+  address. [Share links](docs/LINKS.md)
 - **Passwords.** Lock a share with a password; your Ferry checks it before anyone gets in.
 - **Phones too.** On Android, share to Ferry from any app's Share menu, scan a QR code to receive,
   and find received files in Downloads/Ferry.

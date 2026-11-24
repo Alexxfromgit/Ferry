@@ -118,6 +118,7 @@ const settings = {
   relay: { mode: "default" },
   closeToTray: true,
   showArtwork: true,
+  shortLinks: true,
 };
 
 export function installDevPreview() {

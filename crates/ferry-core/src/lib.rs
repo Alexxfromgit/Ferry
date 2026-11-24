@@ -10,6 +10,7 @@ mod config;
 mod events;
 mod identity;
 mod link;
+mod links_service;
 mod node;
 pub mod protocol;
 mod provider;
@@ -25,6 +26,7 @@ pub use link::{
     CODE_LEN, FileEntry, LINK_SCHEME, SHARE_FILE_EXTENSION, ShareLink, ShareToken, WEB_LINK_HOST,
     format_code, is_app_url, is_share_url, share_code,
 };
+pub use links_service::DEFAULT_LINK_SERVICE;
 pub use node::{AccessError, Node, NodeStatus, PREVIEW_FILES, Preview};
 pub use registry::{DownloadInfo, DownloadStatus, ShareInfo, SkipReason, SkippedItem};
 pub use ticket_file::{read_ticket_file, read_ticket_from};

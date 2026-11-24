@@ -107,6 +107,8 @@ export interface Settings {
   relay: RelayChoice;
   closeToTray: boolean;
   showArtwork: boolean;
+  /** Make short links through Ferry's link service. */
+  shortLinks: boolean;
 }
 
 export interface AppInfo {

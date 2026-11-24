@@ -1702,6 +1702,8 @@ dependencies = [
  "irpc",
  "n0-future",
  "postcard",
+ "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",

@@ -28,6 +28,10 @@ struct Cli {
     #[arg(long, global = true, default_value = "default")]
     relay: String,
 
+    /// Don't use Ferry's link service: share full links only, and don't open short ones.
+    #[arg(long, global = true)]
+    no_short_links: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -92,6 +96,9 @@ async fn main() -> anyhow::Result<()> {
     relay.validate()?;
     let mut config = Config::new(data_dir);
     config.relay = relay.clone();
+    if cli.no_short_links {
+        config.links_service = None;
+    }
     // A one-shot tool should not quietly continue old downloads in the background.
     config.resume_downloads = false;
     let node = Node::start(config).await?;
@@ -191,6 +198,19 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                 };
                 node.save_share_file(&share.id, &path).await?;
                 println!("share file written to {}", path.display());
+            }
+            // The short link follows once the link service has it; give it a moment.
+            if node.short_links_on() {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+                while !share.link.contains("/s/") && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    if let Some(current) = node.share(&share.id) {
+                        share = current;
+                    }
+                }
+                if !share.link.contains("/s/") {
+                    eprintln!("note: the link service didn't answer; this is the full link");
+                }
             }
             println!("\nsend this link to the recipient:\n\n{}\n", share.link);
             println!("share code: {}", format_code(&share.code));
