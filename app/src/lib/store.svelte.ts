@@ -322,12 +322,12 @@ async function refreshStatus() {
   }
 }
 
-/** Loads the artwork setting. If settings can't be read, the default (on) applies. */
+/** Loads the artwork setting. If settings can't be read, the default (off) applies. */
 async function loadArtworkSetting() {
   try {
     app.showArtwork = (await api.getSettings()).showArtwork;
   } catch {
-    app.showArtwork = true;
+    app.showArtwork = false;
   }
 }
 

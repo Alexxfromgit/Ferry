@@ -112,7 +112,7 @@ const settings = {
   downloadDir: "C:\\Users\\alex\\Downloads",
   relay: { mode: "default" },
   closeToTray: true,
-  showArtwork: true,
+  showArtwork: false,
 };
 
 export function installDevPreview() {

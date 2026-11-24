@@ -341,9 +341,9 @@ describe("drag and drop", () => {
 
 describe("artwork", () => {
   it("follows the saved setting", async () => {
-    backend.get_settings = () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: false });
+    backend.get_settings = () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: true });
     const { app } = await freshStore();
-    expect(app.showArtwork).toBe(false);
+    expect(app.showArtwork).toBe(true);
   });
 
   it("stays unknown until settings load, and init waits for them", async () => {
@@ -365,7 +365,7 @@ describe("artwork", () => {
     expect(app.showArtwork).toBe(false);
   });
 
-  it("falls back to showing artwork when settings can't be read, even if startup fails", async () => {
+  it("falls back to hiding artwork when settings can't be read, even if startup fails", async () => {
     backend.get_settings = () => {
       throw new Error("unreadable");
     };
@@ -375,6 +375,6 @@ describe("artwork", () => {
     vi.resetModules();
     const { app, init } = await import("./store.svelte");
     await expect(init()).rejects.toThrow("node down");
-    expect(app.showArtwork).toBe(true);
+    expect(app.showArtwork).toBe(false);
   });
 });
