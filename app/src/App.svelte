@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { fade } from "svelte/transition";
-  import { activeDownloadCount, app, init, isMobile, receive, toast, type View } from "./lib/store.svelte";
+  import { activeDownloadCount, app, init, isMobile, receive, splashing, toast, type View } from "./lib/store.svelte";
   import { compactCount, exactCount } from "./lib/format";
   import { message } from "./lib/api";
   import SendView from "./lib/SendView.svelte";
@@ -11,6 +11,7 @@
   import Scene, { type SceneMode } from "./lib/Scene.svelte";
   import Splash from "./lib/Splash.svelte";
   import { motion } from "./lib/motion";
+
 
   onMount(() => {
     init()
@@ -98,7 +99,7 @@
   <Scene mode={sceneMode} phone={isMobile()} />
 {/if}
 
-<div class="shell" class:phone={isMobile()}>
+<div class="shell" class:phone={isMobile()} inert={splashing()}>
   <nav class="glass" aria-label="Main">
     <div class="brand">
       <img src="/ferry-icon.png" alt="" width="40" height="40" />
@@ -146,11 +147,15 @@
       <SettingsView />
     {/if}
   </main>
-
-  {#if app.toast}
-    <div class="toast glass" class:error={app.toast.error} role={app.toast.error ? "alert" : "status"}>{app.toast.text}</div>
-  {/if}
 </div>
+
+<!-- Outside the shell and above the splash: a toast raised while starting (an error, or a phone
+     share taken in at launch) is seen and announced, not hidden behind the inert UI. -->
+{#if app.toast}
+  <div class="toast glass" class:phone={isMobile()} class:error={app.toast.error} role={app.toast.error ? "alert" : "status"}>
+    {app.toast.text}
+  </div>
+{/if}
 
 {#if app.dragging}
   <!-- Shown while files are dragged over the window; the drop itself goes to Tauri. Screen
@@ -166,8 +171,8 @@
 <!-- Always mounted: a live region added together with its text is often not announced. -->
 <p class="sr-only" role="status">{app.dragging ? `${drop.title}. ${drop.detail}` : ""}</p>
 
-{#if !app.ready}
-  <Splash artwork={app.showArtwork === true} />
+{#if splashing()}
+  <Splash artwork={app.showArtwork} phone={isMobile()} ready={app.ready} ondone={() => (app.introDone = true)} />
 {/if}
 
 <style>
@@ -364,6 +369,7 @@
 
   .toast {
     position: fixed;
+    z-index: 11;
     bottom: 1.25rem;
     left: 50%;
     transform: translateX(-50%);
@@ -440,7 +446,7 @@
     font-size: var(--t-xl);
   }
 
-  .shell.phone .toast {
+  .toast.phone {
     bottom: calc(5rem + env(safe-area-inset-bottom));
   }
 

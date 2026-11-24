@@ -11,6 +11,7 @@
     isMobile,
     openTicket,
     receive,
+    splashing,
     startDownload,
   } from "./store.svelte";
   import DownloadRow from "./DownloadRow.svelte";
@@ -71,9 +72,13 @@
     if (typeof password === "string" && password) void openTicket(path, password);
   }
 
-  function focusPassword(input: HTMLInputElement) {
-    input.focus();
-  }
+  // The password field takes focus when it appears. A protected ticket opened at launch
+  // mounts it behind the startup splash, where the UI is inert and focus can't land, so it
+  // waits for the splash to go.
+  let passwordInput = $state<HTMLInputElement | null>(null);
+  $effect(() => {
+    if (passwordInput && !splashing()) passwordInput.focus();
+  });
 
   async function chooseDest() {
     const dir = await open({ directory: true, defaultPath: receive.dest ?? settingsDir });
@@ -127,7 +132,7 @@
       <form class="unlock glass" onsubmit={unlockTicket}>
         <label for="ticket-password">Password for {receive.protectedTicket.split(/[\\/]/).at(-1)}</label>
         <div class="paste">
-          <input id="ticket-password" name="password" type="password" autocomplete="off" use:focusPassword required />
+          <input id="ticket-password" name="password" type="password" autocomplete="off" bind:this={passwordInput} required />
           <button class="primary" type="submit" disabled={receive.openingTicket}>Unlock ticket</button>
           <button class="quiet" type="button" onclick={clearPreview}>Cancel</button>
         </div>

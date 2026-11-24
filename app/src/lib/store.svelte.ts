@@ -44,6 +44,8 @@ export const app = $state({
   dragKind: "files" as DragKind,
   /** False until `init` has finished, while the startup splash shows. */
   ready: false,
+  /** Set once the startup intro has had its minimum time; it stays up while init runs on. */
+  introDone: false,
   /** Mirrors the saved setting, so the backdrop can follow it without reloading settings.
    *  Null until it has loaded, so artwork never shows to someone who turned it off. */
   showArtwork: null as boolean | null,
@@ -351,6 +353,11 @@ async function loadSaved() {
 }
 
 /** Phones open on Receive (scanning a code is the common case) and can't drop files. */
+/** Whether the startup splash still covers the UI, which is inert until it goes. */
+export function splashing(): boolean {
+  return !app.ready || !app.introDone;
+}
+
 export function isMobile(): boolean {
   return app.info?.mobile ?? false;
 }
