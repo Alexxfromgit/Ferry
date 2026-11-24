@@ -733,7 +733,9 @@ async fn locked_shares_need_their_password() {
         .await
         .unwrap();
     assert!(locked.locked);
-    assert_eq!(locked.link, share.link, "the link stays the same");
+    // The share keeps its token, so its code (and link) stay the same. The link itself is not
+    // compared: without relays it lists this device's addresses, which can change meanwhile.
+    assert_eq!(locked.code, share.code, "the link stays the same");
     let registry = std::fs::read_to_string(sender_dir.join("registry.json")).unwrap();
     assert!(
         !registry.contains("winter"),
@@ -1069,7 +1071,8 @@ async fn file_lists_live_outside_the_registry() {
     let TicketFile::Ready(link) = TicketFile::read(&path).unwrap() else {
         panic!("an unlocked share's file opens without a password");
     };
-    assert_eq!(link, ShareLink::parse(&share.link).unwrap());
+    // Codes, not whole links: without relays a link lists addresses, which can change.
+    assert_eq!(link.code(), share.code);
     let password = || Some(TicketPassword::from("winter crossing".to_owned()));
     assert!(
         node.save_share_file(&share.id, &path, password())
@@ -1099,8 +1102,9 @@ async fn file_lists_live_outside_the_registry() {
     assert_eq!(
         protected
             .unlock(TicketPassword::from("winter crossing".to_owned()))
-            .unwrap(),
-        link
+            .unwrap()
+            .code(),
+        share.code
     );
 
     node.remove_share(&share.id).await.unwrap();
