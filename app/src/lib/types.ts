@@ -22,8 +22,12 @@ export interface ShareInfo {
   fileCount: number;
   totalSize: number;
   createdAt: number;
+  /** The link to send; it names this device and the share, never an IP address. */
   link: string;
-  ticket: string;
+  /** The share's short code, e.g. `K7X2QP9A4MZT`. */
+  code: string;
+  /** Recipients need a password. */
+  locked: boolean;
   /** Up to 100 items left out of the share; `skippedCount` is the full number. */
   skipped?: SkippedItem[];
   skippedCount?: number;
@@ -60,7 +64,8 @@ export type DownloadStatus =
 
 export interface DownloadInfo {
   id: string;
-  ticket: string;
+  /** The sender's link, used to reconnect when resuming. */
+  link: string;
   destDir: string;
   name: string;
   status: DownloadStatus;

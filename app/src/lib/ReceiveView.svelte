@@ -63,13 +63,15 @@
     }
   }
 
-  function unlockTicket(event: SubmitEvent & { currentTarget: HTMLFormElement }) {
+  /** Unlock a protected ticket file, or open a share whose sender asks for a password. */
+  function unlock(event: SubmitEvent & { currentTarget: HTMLFormElement }) {
     event.preventDefault();
-    const path = receive.protectedTicket;
-    if (!path || receive.openingTicket) return;
+    if (receive.openingTicket || receive.checking) return;
     const password = new FormData(event.currentTarget).get("password");
     event.currentTarget.reset();
-    if (typeof password === "string" && password) void openTicket(path, password);
+    if (typeof password !== "string" || !password) return;
+    if (receive.protectedTicket) void openTicket(receive.protectedTicket, password);
+    else if (receive.lockedLink) void checkLink(receive.lockedLink, password);
   }
 
   // The password field takes focus when it appears. A protected ticket opened at launch
@@ -127,13 +129,19 @@
     </button>
   </form>
 
-  {#if receive.protectedTicket}
-    {#key receive.protectedTicket}
-      <form class="unlock glass" onsubmit={unlockTicket}>
-        <label for="ticket-password">Password for {receive.protectedTicket.split(/[\\/]/).at(-1)}</label>
+  {#if receive.protectedTicket || receive.lockedLink}
+    {#key receive.protectedTicket ?? receive.lockedLink}
+      <form class="unlock glass" onsubmit={unlock}>
+        <label for="ticket-password">
+          {receive.protectedTicket
+            ? `Password for ${receive.protectedTicket.split(/[\\/]/).at(-1)}`
+            : "This share is protected. Enter the password the sender gave you."}
+        </label>
         <div class="paste">
           <input id="ticket-password" name="password" type="password" autocomplete="off" bind:this={passwordInput} required />
-          <button class="primary" type="submit" disabled={receive.openingTicket}>Unlock ticket</button>
+          <button class="primary" type="submit" disabled={receive.openingTicket || receive.checking}>
+            {receive.protectedTicket ? "Unlock ticket" : "Open share"}
+          </button>
           <button class="quiet" type="button" onclick={clearPreview}>Cancel</button>
         </div>
       </form>

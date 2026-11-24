@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use iroh::EndpointId;
 use iroh_blobs::{
     Hash,
     protocol::{ChunkRanges, ChunkRangesSeq},
@@ -27,13 +28,15 @@ use crate::{
 
 /// Which provider events we subscribe to.
 ///
+/// - `connected` is intercepted to learn which device each connection comes from: a share is
+///   served only to devices granted it through the Ferry protocol (see `crate::protocol`).
 /// - `get` is intercepted so that only active shares are served. Each served request is also
 ///   tracked; when its share is turned off or removed, the tracker drops the request's progress
 ///   channel, and iroh-blobs aborts the transfer at its next write. So turning a share off also
 ///   ends downloads that are already running.
 /// - `get_many`, `push` and `observe` are not used by Ferry clients and are refused.
 pub const EVENT_MASK: EventMask = EventMask {
-    connected: ConnectMode::None,
+    connected: ConnectMode::Intercept,
     get: RequestMode::InterceptLog,
     get_many: RequestMode::Disabled,
     push: RequestMode::Disabled,
@@ -59,9 +62,12 @@ struct Served {
     sizes: Option<Arc<[u64]>>,
 }
 
+/// A connection: the endpoint it arrived on (Ferry may run more than one) and its id there.
+pub(crate) type ConnectionKey = (u8, u64);
+
 /// A request is identified by its connection and its id; request ids are QUIC stream
 /// numbers, which repeat on every connection.
-type RequestKey = (u64, u64);
+type RequestKey = (ConnectionKey, u64);
 
 struct RequestStats {
     /// Unique for the life of the node; what the UI uses to tell receivers apart.
@@ -113,6 +119,10 @@ pub(crate) struct Activity {
 
 pub struct ProviderState {
     shared: RwLock<HashMap<Hash, Served>>,
+    /// Devices that may fetch each share, whether or not it is served right now.
+    grants: RwLock<HashMap<Hash, HashSet<EndpointId>>>,
+    /// The device behind each open connection.
+    peers: Mutex<HashMap<ConnectionKey, EndpointId>>,
     stats: Mutex<HashMap<Hash, ShareStats>>,
     /// Bumped whenever a share stops being served, so running transfers re-check.
     revoked: watch::Sender<u64>,
@@ -125,6 +135,8 @@ impl ProviderState {
     pub fn new(file_lists: FileLists) -> Self {
         Self {
             shared: RwLock::default(),
+            grants: RwLock::default(),
+            peers: Mutex::default(),
             stats: Mutex::default(),
             revoked: watch::Sender::new(0),
             file_lists,
@@ -159,9 +171,59 @@ impl ProviderState {
         }
     }
 
-    /// Stop serving a share for good: running transfers end and its statistics are dropped.
+    /// Replace the devices that may fetch a share. Transfers to devices no longer on the
+    /// list end.
+    pub fn set_grants(&self, hash: Hash, devices: impl IntoIterator<Item = EndpointId>) {
+        let devices: HashSet<EndpointId> = devices.into_iter().collect();
+        let revoked = {
+            let mut grants = self.grants.write().unwrap();
+            let before = grants.insert(hash, devices.clone()).unwrap_or_default();
+            !before.is_subset(&devices)
+        };
+        if revoked {
+            self.revoke_running(&hash);
+        }
+    }
+
+    /// Let one more device fetch a share.
+    pub fn grant(&self, hash: Hash, device: EndpointId) {
+        self.grants
+            .write()
+            .unwrap()
+            .entry(hash)
+            .or_default()
+            .insert(device);
+    }
+
+    fn is_granted(&self, hash: &Hash, device: &EndpointId) -> bool {
+        self.grants
+            .read()
+            .unwrap()
+            .get(hash)
+            .is_some_and(|devices| devices.contains(device))
+    }
+
+    /// End the running transfers of a share; it stays served, in a new generation, so
+    /// requests made from now on are checked again.
+    fn revoke_running(&self, hash: &Hash) {
+        {
+            let mut shared = self.shared.write().unwrap();
+            if let Some(served) = shared.get_mut(hash) {
+                served.generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if let Some(stats) = self.stats.lock().unwrap().get_mut(hash) {
+            stats.requests.clear();
+            stats.dirty = true;
+        }
+        self.revoked.send_modify(|n| *n += 1);
+    }
+
+    /// Stop serving a share for good: running transfers end, and its grants and statistics
+    /// are dropped.
     pub fn disallow(&self, hash: &Hash) {
         self.shared.write().unwrap().remove(hash);
+        self.grants.write().unwrap().remove(hash);
         self.stats.lock().unwrap().remove(hash);
         self.revoked.send_modify(|n| *n += 1);
     }
@@ -177,12 +239,17 @@ impl ProviderState {
         self.revoked.send_modify(|n| *n += 1);
     }
 
-    /// Admit a request for `hash` if the share is served, noting the generation it is served
-    /// in. This happens before permission is sent, so a request admitted before the share is
+    /// Admit a request for `hash` from `connection` if the share is served and the device
+    /// behind the connection was granted it, noting the generation the share is served in.
+    /// This happens before permission is sent, so a request admitted before the share is
     /// turned off is ended even if the share is turned on again before it is tracked. The
     /// subscription is made first, so a share turned off right after this is noticed too.
-    fn admit(&self, hash: &Hash) -> Option<Admission> {
+    fn admit(&self, hash: &Hash, connection: ConnectionKey) -> Option<Admission> {
         let revoked = self.revoked.subscribe();
+        let device = *self.peers.lock().unwrap().get(&connection)?;
+        if !self.is_granted(hash, &device) {
+            return None;
+        }
         let generation = self.generation(hash)?;
         Some(Admission {
             generation,
@@ -340,16 +407,18 @@ fn requested_file_bytes(ranges: &ChunkRangesSeq, sizes: &[u64]) -> u64 {
         .sum()
 }
 
-/// Handle provider messages until the blobs protocol shuts down.
-pub async fn run(state: Arc<ProviderState>, mut rx: mpsc::Receiver<ProviderMessage>) {
+/// Handle provider messages from the blobs protocol on endpoint number `endpoint` until it
+/// shuts down.
+pub async fn run(state: Arc<ProviderState>, endpoint: u8, mut rx: mpsc::Receiver<ProviderMessage>) {
     while let Some(msg) = rx.recv().await {
         match msg {
             ProviderMessage::GetRequestReceived(msg) => {
                 let hash = msg.inner.request.hash;
-                if let Some(admission) = state.admit(&hash) {
+                let connection = (endpoint, msg.inner.connection_id);
+                if let Some(admission) = state.admit(&hash, connection) {
                     msg.tx.send(Ok(())).await.ok();
                     let request = Request {
-                        key: (msg.inner.connection_id, msg.inner.request_id),
+                        key: (connection, msg.inner.request_id),
                         ranges: msg.inner.request.ranges.clone(),
                     };
                     tokio::spawn(track_request(
@@ -360,7 +429,7 @@ pub async fn run(state: Arc<ProviderState>, mut rx: mpsc::Receiver<ProviderMessa
                         msg.rx,
                     ));
                 } else {
-                    tracing::debug!(%hash, "refusing request for a hash that is not shared");
+                    tracing::debug!(%hash, "refusing a request for a share not open to this device");
                     msg.tx.send(Err(AbortReason::Permission)).await.ok();
                 }
             }
@@ -368,7 +437,23 @@ pub async fn run(state: Arc<ProviderState>, mut rx: mpsc::Receiver<ProviderMessa
                 msg.tx.send(Err(AbortReason::Permission)).await.ok();
             }
             ProviderMessage::ClientConnected(msg) => {
-                msg.tx.send(Ok(())).await.ok();
+                let connection = (endpoint, msg.inner.connection_id);
+                match msg.inner.endpoint_id {
+                    Some(device) => {
+                        state.peers.lock().unwrap().insert(connection, device);
+                        msg.tx.send(Ok(())).await.ok();
+                    }
+                    None => {
+                        msg.tx.send(Err(AbortReason::Permission)).await.ok();
+                    }
+                }
+            }
+            ProviderMessage::ConnectionClosed(msg) => {
+                state
+                    .peers
+                    .lock()
+                    .unwrap()
+                    .remove(&(endpoint, msg.inner.connection_id));
             }
             ProviderMessage::Throttle(msg) => {
                 msg.tx.send(Ok(())).await.ok();
@@ -619,7 +704,7 @@ mod tests {
         state.with_stats(hash, generation, |s| {
             s.uploaded = 500;
             s.requests.insert(
-                (1, 2),
+                ((0, 1), 2),
                 RequestStats {
                     receiver_id: 1,
                     requested: 1000,
@@ -653,7 +738,7 @@ mod tests {
         state.disallow(&hash);
         assert!(state.take_changes().is_empty());
         // A request finishing late never brings the stats of a removed share back.
-        state.forget(&hash, &(1, 2));
+        state.forget(&hash, &((0, 1), 2));
         assert!(!state.with_stats(hash, again, |s| s.uploaded += 1));
         assert!(state.take_changes().is_empty());
     }
@@ -680,14 +765,19 @@ mod tests {
                 .map_or(0, |s| s.requests.len())
         };
 
+        let connection = (0, 1);
+        let device = iroh::SecretKey::generate().public();
+        state.peers.lock().unwrap().insert(connection, device);
+        state.grant(hash, device);
+
         // Admitted (and so given permission), then the share is turned off and on again
         // before the tracker runs.
-        let stale = state.admit(&hash).unwrap();
+        let stale = state.admit(&hash, connection).unwrap();
         state.pause(&hash);
         state.allow(hash, 1000, None);
         let (tx, rx) = irpc::channel::mpsc::channel::<RequestUpdate>(8);
         let request = Request {
-            key: (1, 1),
+            key: (connection, 1),
             ranges: all(),
         };
         tokio::time::timeout(
@@ -700,10 +790,10 @@ mod tests {
         drop(tx);
 
         // A request admitted in the current generation is tracked until it ends.
-        let current = state.admit(&hash).unwrap();
+        let current = state.admit(&hash, connection).unwrap();
         let (tx, rx) = irpc::channel::mpsc::channel::<RequestUpdate>(8);
         let request = Request {
-            key: (2, 1),
+            key: (connection, 2),
             ranges: all(),
         };
         let task = tokio::spawn(track_request(state.clone(), hash, current, request, rx));
@@ -716,6 +806,51 @@ mod tests {
             .expect("turning off ends a tracked request")
             .unwrap();
         drop(tx);
+    }
+
+    #[tokio::test]
+    async fn only_granted_devices_are_admitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(ProviderState::new(FileLists::new(dir.path().to_path_buf())));
+        let hash = Hash::new(b"share");
+        state.allow(hash, 1000, Some(Arc::from([1000u64])));
+        let (alice, mallory) = (
+            iroh::SecretKey::generate().public(),
+            iroh::SecretKey::generate().public(),
+        );
+        state.peers.lock().unwrap().insert((0, 1), alice);
+        state.peers.lock().unwrap().insert((1, 1), mallory);
+
+        assert!(
+            state.admit(&hash, (0, 1)).is_none(),
+            "nobody is granted yet"
+        );
+        state.grant(hash, alice);
+        assert!(state.admit(&hash, (0, 1)).is_some());
+        assert!(state.admit(&hash, (1, 1)).is_none(), "another device");
+        assert!(
+            state.admit(&hash, (0, 9)).is_none(),
+            "an unknown connection"
+        );
+        assert!(state.admit(&Hash::new(b"other"), (0, 1)).is_none());
+
+        // Pausing keeps grants; removing the grants ends running transfers.
+        state.pause(&hash);
+        state.allow(hash, 1000, None);
+        let generation = state.generation(&hash).unwrap();
+        assert!(state.admit(&hash, (0, 1)).is_some());
+        state.set_grants(hash, []);
+        assert!(state.admit(&hash, (0, 1)).is_none());
+        assert_ne!(
+            state.generation(&hash),
+            Some(generation),
+            "transfers are ended"
+        );
+
+        state.grant(hash, alice);
+        state.disallow(&hash);
+        state.allow(hash, 1000, None);
+        assert!(state.admit(&hash, (0, 1)).is_none(), "removal drops grants");
     }
 
     #[test]

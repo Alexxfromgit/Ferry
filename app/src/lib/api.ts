@@ -3,6 +3,12 @@ import type { AppInfo, DownloadInfo, NodeStatus, Preview, SaveState, Settings, S
 
 type IncomingShare = { kind: "link"; link: string } | { kind: "file"; path: string };
 type OpenedTicket = { kind: "ready"; link: string } | { kind: "passwordRequired" };
+/** A preview, or why the sender wants a (different) password first. */
+export type PreviewOutcome =
+  | { kind: "ready"; preview: Preview }
+  | { kind: "passwordRequired" }
+  | { kind: "wrongPassword" }
+  | { kind: "tooManyGuesses"; retryAfterSecs: number };
 
 export const api = {
   nodeStatus: () => invoke<NodeStatus>("node_status"),
@@ -13,15 +19,20 @@ export const api = {
   removeShare: (id: string) => invoke<void>("remove_share", { id }),
   /** Turn a share off (paused) or back on; turning on fails if its files changed. */
   setSharePaused: (id: string, paused: boolean) => invoke<ShareInfo>("set_share_paused", { id, paused }),
+  /** A locked share's ticket file needs its password, and is encrypted with it. */
   saveShareFile: (id: string, path: string, password?: string) =>
     invoke<void>("save_share_file", { id, path, password: password ?? null }),
+  /** Protect a share with a password, change it, or remove it (`null`). */
+  setSharePassword: (id: string, password: string | null) =>
+    invoke<ShareInfo>("set_share_password", { id, password }),
   shareQr: (id: string) => invoke<string>("share_qr", { id }),
   readShareFile: (path: string, password?: string) =>
     invoke<OpenedTicket>("read_share_file", { path, password: password ?? null }),
-  preview: (link: string) => invoke<Preview>("preview", { link }),
+  preview: (link: string, password?: string) =>
+    invoke<PreviewOutcome>("preview", { link, password: password ?? null }),
   listDownloads: () => invoke<DownloadInfo[]>("list_downloads"),
-  startDownload: (link: string, dest?: string) =>
-    invoke<DownloadInfo>("start_download", { link, dest: dest ?? null }),
+  startDownload: (link: string, dest?: string, password?: string) =>
+    invoke<DownloadInfo>("start_download", { link, dest: dest ?? null, password: password ?? null }),
   pauseDownload: (id: string) => invoke<void>("pause_download", { id }),
   resumeDownload: (id: string) => invoke<void>("resume_download", { id }),
   removeDownload: (id: string) => invoke<void>("remove_download", { id }),

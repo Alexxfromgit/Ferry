@@ -2,11 +2,16 @@
 
 use std::{path::Path, time::Duration};
 
-use ferry_core::{Config, DownloadInfo, DownloadStatus, Event, Node, RelayChoice, ShareLink};
-use iroh::{Endpoint, RelayMode, SecretKey, endpoint::presets, protocol::Router};
+use std::sync::Arc;
+
+use ferry_core::{
+    AccessError, Config, DownloadInfo, DownloadStatus, Event, Node, RelayChoice, ShareLink,
+    ShareToken, TicketFile, TicketPassword, protocol,
+};
+use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, endpoint::presets, protocol::Router};
 use iroh_blobs::{
-    BlobFormat, BlobsProtocol, format::collection::Collection, store::mem::MemStore,
-    ticket::BlobTicket,
+    BlobsProtocol, Hash, format::collection::Collection, get::request::get_hash_seq_and_sizes,
+    store::mem::MemStore,
 };
 
 fn init_tracing() {
@@ -60,6 +65,19 @@ async fn wait_for_partial(events: &mut tokio::sync::broadcast::Receiver<Event>, 
     .expect("no progress reported")
 }
 
+/// A sender that lets every device fetch one share.
+struct OpenToAll(Hash);
+
+impl protocol::Handler for OpenToAll {
+    async fn open(
+        &self,
+        _remote: EndpointId,
+        _request: protocol::OpenRequest,
+    ) -> protocol::OpenResponse {
+        protocol::OpenResponse::Ok { hash: self.0 }
+    }
+}
+
 /// A hand-made peer serving an arbitrary collection, to test what a malicious or foreign
 /// sender could send.
 async fn foreign_peer(names: Vec<String>) -> (Router, ShareLink) {
@@ -72,17 +90,27 @@ async fn foreign_peer(names: Vec<String>) -> (Router, ShareLink) {
     let root = collection.store(&store).await.unwrap();
     let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
-        .alpns(vec![iroh_blobs::ALPN.to_vec()])
+        .alpns(vec![iroh_blobs::ALPN.to_vec(), protocol::ALPN.to_vec()])
         .bind()
         .await
         .unwrap();
     let router = Router::builder(endpoint)
         .accept(iroh_blobs::ALPN, BlobsProtocol::new(&store, None))
+        .accept(
+            protocol::ALPN,
+            protocol::Protocol::new(Arc::new(OpenToAll(root.hash()))),
+        )
         .spawn();
-    let ticket = BlobTicket::new(router.endpoint().addr(), root.hash(), BlobFormat::HashSeq);
+    let link = link_to(router.endpoint(), ShareToken::generate());
     // Keep the data alive for the lifetime of the router.
     std::mem::forget((data, root, store));
-    (router, ShareLink::new(ticket))
+    (router, link)
+}
+
+/// A link to `endpoint` (with its addresses, as there are no relays).
+fn link_to(endpoint: &Endpoint, token: ShareToken) -> ShareLink {
+    let addrs: Vec<_> = endpoint.addr().ip_addrs().copied().collect();
+    ShareLink::with_addrs(endpoint.id(), token, &addrs)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -109,7 +137,7 @@ async fn share_folder_preview_and_download() {
     assert_eq!(share.total_size, big.len() as u64 + 32);
 
     let link = ShareLink::parse(&share.link).unwrap();
-    let preview = receiver.preview(&link).await.unwrap();
+    let preview = receiver.preview(&link, None).await.unwrap();
     assert_eq!(preview.name, "Holiday");
     assert_eq!(preview.total_size, share.total_size);
     let names: Vec<_> = preview.files.iter().map(|f| f.name.as_str()).collect();
@@ -126,7 +154,10 @@ async fn share_folder_preview_and_download() {
     let dest = tmp.path().join("downloads");
     // A folder with the same name already exists: it must not be overwritten.
     std::fs::create_dir_all(dest.join("Holiday")).unwrap();
-    let started = receiver.start_download(&link, dest.clone()).await.unwrap();
+    let started = receiver
+        .start_download(&link, None, dest.clone())
+        .await
+        .unwrap();
     let done = wait_for_end(&receiver, &started.id).await;
     assert_eq!(done.status, DownloadStatus::Completed, "{:?}", done.error);
     let saved = done.saved_path.unwrap();
@@ -165,7 +196,7 @@ async fn relative_destination_is_resolved_up_front() {
     let cwd = std::env::current_dir().unwrap();
     let relative = Path::new("target-ferry-test-relative").join(&share.id[..8]);
     let started = receiver
-        .start_download(&link, relative.clone())
+        .start_download(&link, None, relative.clone())
         .await
         .unwrap();
     assert!(started.dest_dir.is_absolute());
@@ -204,13 +235,13 @@ async fn removed_share_is_refused_but_files_stay() {
         "already removed"
     );
 
-    assert!(receiver.preview(&link).await.is_err());
-    let started = receiver
-        .start_download(&link, tmp.path().join("dl"))
+    assert!(receiver.preview(&link, None).await.is_err());
+    let err = receiver
+        .start_download(&link, None, tmp.path().join("dl"))
         .await
-        .unwrap();
-    let done = wait_for_end(&receiver, &started.id).await;
-    assert_eq!(done.status, DownloadStatus::Failed);
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("isn't sharing this"), "{err:#}");
+    assert!(receiver.list_downloads().is_empty());
 
     sender.shutdown().await.unwrap();
     receiver.shutdown().await.unwrap();
@@ -230,7 +261,7 @@ async fn removing_a_share_ends_a_running_transfer() {
 
     let mut events = receiver.subscribe();
     let started = receiver
-        .start_download(&link, tmp.path().join("dl"))
+        .start_download(&link, None, tmp.path().join("dl"))
         .await
         .unwrap();
     let partial = wait_for_partial(&mut events, &started.id).await;
@@ -268,7 +299,7 @@ async fn a_share_turned_off_is_refused_until_turned_on_again() {
     let off = sender.set_share_paused(&share.id, true).await.unwrap();
     assert!(off.paused);
     assert_eq!(sender.list_shares().len(), 1, "a share turned off is kept");
-    assert!(receiver.preview(&link).await.is_err());
+    assert!(receiver.preview(&link, None).await.is_err());
 
     // It stays off after a restart.
     sender.shutdown().await.unwrap();
@@ -277,7 +308,7 @@ async fn a_share_turned_off_is_refused_until_turned_on_again() {
     assert!(sender.list_shares()[0].paused);
     // The restarted node listens on new addresses; take the link it gives now.
     let link = ShareLink::parse(&sender.list_shares()[0].link).unwrap();
-    let err = receiver.preview(&link).await.unwrap_err().to_string();
+    let err = receiver.preview(&link, None).await.unwrap_err().to_string();
     assert!(
         !err.contains("could not reach"),
         "the sender must answer and refuse: {err}"
@@ -297,7 +328,7 @@ async fn a_share_turned_off_is_refused_until_turned_on_again() {
     let on = sender.set_share_paused(&share.id, false).await.unwrap();
     assert!(!on.paused);
     let started = receiver
-        .start_download(&link, tmp.path().join("dl"))
+        .start_download(&link, None, tmp.path().join("dl"))
         .await
         .unwrap();
     let done = wait_for_end(&receiver, &started.id).await;
@@ -335,7 +366,7 @@ async fn turning_off_reports_a_failed_save_but_stays_off() {
         }
     }
     assert!(announced, "the change is still announced");
-    assert!(receiver.preview(&link).await.is_err());
+    assert!(receiver.preview(&link, None).await.is_err());
 
     // Once saving works again, the off state is saved and survives a restart.
     std::fs::remove_dir(&registry).unwrap();
@@ -431,7 +462,7 @@ async fn shares_and_identity_survive_restart() {
     let receiver = node(&tmp.path().join("receiver")).await;
     let link = ShareLink::parse(&shares[0].link).unwrap();
     let started = receiver
-        .start_download(&link, tmp.path().join("dl"))
+        .start_download(&link, None, tmp.path().join("dl"))
         .await
         .unwrap();
     let done = wait_for_end(&receiver, &started.id).await;
@@ -487,8 +518,8 @@ async fn two_receivers_at_once_are_told_apart() {
 
     let started = std::time::Instant::now();
     let (a, b) = tokio::join!(
-        first.start_download(&link, tmp.path().join("dl1")),
-        second.start_download(&link, tmp.path().join("dl2")),
+        first.start_download(&link, None, tmp.path().join("dl1")),
+        second.start_download(&link, None, tmp.path().join("dl2")),
     );
     let (a, b) = (a.unwrap(), b.unwrap());
 
@@ -550,9 +581,9 @@ async fn upload_activity_is_reported() {
     let link = ShareLink::parse(&share.link).unwrap();
     // A preview probes sizes by fetching only the last chunk of each file; that must not be
     // counted as a full upload.
-    receiver.preview(&link).await.unwrap();
+    receiver.preview(&link, None).await.unwrap();
     let started = receiver
-        .start_download(&link, tmp.path().join("dl"))
+        .start_download(&link, None, tmp.path().join("dl"))
         .await
         .unwrap();
     assert_eq!(
@@ -611,7 +642,7 @@ async fn rapid_pause_resume_pause_stays_consistent() {
     let link = ShareLink::parse(&share.link).unwrap();
 
     let started = receiver
-        .start_download(&link, tmp.path().join("dl"))
+        .start_download(&link, None, tmp.path().join("dl"))
         .await
         .unwrap();
     for _ in 0..5 {
@@ -636,39 +667,183 @@ async fn rapid_pause_resume_pause_stays_consistent() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_download_that_fails_at_once_can_be_retried() {
+async fn a_failed_download_can_be_started_again() {
     init_tracing();
     let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("movie.bin");
+    let data = content(64 * 1024 * 1024, 9);
+    std::fs::write(&file, &data).unwrap();
+    let sender = node(&tmp.path().join("sender")).await;
     let receiver = node(&tmp.path().join("receiver")).await;
-    // Nobody is listening for this node id and there are no addresses or relays.
-    let addr = iroh::EndpointAddr::new(SecretKey::generate().public());
-    let ticket = BlobTicket::new(addr, iroh_blobs::Hash::new(b"x"), BlobFormat::HashSeq);
-    let link = ShareLink::new(ticket);
+    let share = sender.create_share(vec![file]).await.unwrap();
+    let link = ShareLink::parse(&share.link).unwrap();
+
+    // Nobody is listening for this device and there are no addresses or relays.
+    let nowhere = ShareLink::direct(SecretKey::generate().public(), ShareToken::generate());
+    assert!(
+        receiver
+            .start_download(&nowhere, None, tmp.path().join("dl"))
+            .await
+            .is_err()
+    );
 
     let started = receiver
-        .start_download(&link, tmp.path().join("dl"))
+        .start_download(&link, None, tmp.path().join("dl"))
+        .await
+        .unwrap();
+    sender.set_share_paused(&share.id, true).await.unwrap();
+    let done = wait_for_end(&receiver, &started.id).await;
+    assert_eq!(done.status, DownloadStatus::Failed);
+    assert!(
+        receiver
+            .start_download(&link, None, tmp.path().join("dl"))
+            .await
+            .is_err(),
+        "refused while sharing is off"
+    );
+
+    // Starting again really restarts it (no stale task blocks it).
+    sender.set_share_paused(&share.id, false).await.unwrap();
+    let again = receiver
+        .start_download(&link, None, tmp.path().join("dl"))
+        .await
+        .unwrap();
+    assert_eq!(again.id, started.id);
+    let done = wait_for_end(&receiver, &started.id).await;
+    assert_eq!(done.status, DownloadStatus::Completed, "{:?}", done.error);
+    assert_eq!(std::fs::read(done.saved_path.unwrap()).unwrap(), data);
+    sender.shutdown().await.unwrap();
+    receiver.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn locked_shares_need_their_password() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("secret.txt");
+    let data = content(200_000, 3);
+    std::fs::write(&file, &data).unwrap();
+    let sender_dir = tmp.path().join("sender");
+    let sender = node(&sender_dir).await;
+    let receiver = node(&tmp.path().join("receiver")).await;
+    let share = sender.create_share(vec![file]).await.unwrap();
+    assert!(!share.locked);
+    let locked = sender
+        .set_share_password(&share.id, Some("winter crossing".into()))
+        .await
+        .unwrap();
+    assert!(locked.locked);
+    assert_eq!(locked.link, share.link, "the link stays the same");
+    let registry = std::fs::read_to_string(sender_dir.join("registry.json")).unwrap();
+    assert!(
+        !registry.contains("winter"),
+        "only a hash of the password is kept"
+    );
+    let link = ShareLink::parse(&share.link).unwrap();
+
+    let access = |e: anyhow::Error| e.downcast_ref::<AccessError>().cloned();
+    let err = receiver.preview(&link, None).await.unwrap_err();
+    assert_eq!(access(err), Some(AccessError::PasswordRequired));
+    let err = receiver
+        .preview(&link, Some("summer".into()))
+        .await
+        .unwrap_err();
+    assert_eq!(access(err), Some(AccessError::WrongPassword));
+    let err = receiver
+        .start_download(&link, None, tmp.path().join("dl"))
+        .await
+        .unwrap_err();
+    assert_eq!(access(err), Some(AccessError::PasswordRequired));
+
+    let preview = receiver
+        .preview(&link, Some("winter crossing".into()))
+        .await
+        .unwrap();
+    assert_eq!(preview.total_size, data.len() as u64);
+    // Once let in, this device needs no password again (so downloads resume on their own).
+    let started = receiver
+        .start_download(&link, None, tmp.path().join("dl"))
         .await
         .unwrap();
     let done = wait_for_end(&receiver, &started.id).await;
-    assert_eq!(done.status, DownloadStatus::Failed);
+    assert_eq!(done.status, DownloadStatus::Completed, "{:?}", done.error);
 
-    // Starting again really restarts it (no stale task blocks it), and fails again.
-    let mut events = receiver.subscribe();
-    receiver
-        .start_download(&link, tmp.path().join("dl"))
+    // A new password shuts out everyone let in before.
+    sender
+        .set_share_password(&share.id, Some("spring tide".into()))
         .await
         .unwrap();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if let Ok(Event::DownloadUpdated { download }) = events.recv().await
-                && download.status == DownloadStatus::Failed
-            {
-                break;
-            }
+    let err = receiver.preview(&link, None).await.unwrap_err();
+    assert_eq!(access(err), Some(AccessError::PasswordRequired));
+
+    // Guessing is slowed down: after a burst of wrong passwords even the right one waits.
+    let mut limited = false;
+    for _ in 0..10 {
+        let err = receiver
+            .preview(&link, Some("wrong".into()))
+            .await
+            .unwrap_err();
+        if let Some(AccessError::TooManyGuesses { retry_after_secs }) = access(err) {
+            assert!(retry_after_secs > 0);
+            limited = true;
+            break;
         }
-    })
-    .await
-    .unwrap();
+    }
+    assert!(limited, "guesses must be limited");
+    let err = receiver
+        .preview(&link, Some("spring tide".into()))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        access(err),
+        Some(AccessError::TooManyGuesses { .. })
+    ));
+
+    // Removing the password opens the share to anyone with the link again.
+    sender.set_share_password(&share.id, None).await.unwrap();
+    receiver.preview(&link, None).await.unwrap();
+
+    sender.shutdown().await.unwrap();
+    receiver.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_content_hash_alone_gets_nothing() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("notes.txt");
+    std::fs::write(&file, content(10_000, 1)).unwrap();
+    let sender = node(&tmp.path().join("sender")).await;
+    let share = sender.create_share(vec![file]).await.unwrap();
+    let hash: Hash = share.id.parse().unwrap();
+
+    // A peer that skips the Ferry protocol and asks for the share by hash is refused.
+    let stranger = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await
+        .unwrap();
+    let ShareLink::Direct { addrs, .. } = ShareLink::parse(&share.link).unwrap() else {
+        unreachable!()
+    };
+    let addr = iroh::EndpointAddr::from_parts(
+        sender.endpoint().id(),
+        addrs.into_iter().map(iroh::TransportAddr::Ip),
+    );
+    let conn = stranger.connect(addr, iroh_blobs::ALPN).await.unwrap();
+    assert!(
+        get_hash_seq_and_sizes(&conn, &hash, 1024 * 1024, None)
+            .await
+            .is_err()
+    );
+    // A made-up token gets nothing either.
+    let receiver = node(&tmp.path().join("receiver")).await;
+    let guessed = link_to(sender.endpoint(), ShareToken::generate());
+    let err = receiver.preview(&guessed, None).await.unwrap_err();
+    assert!(format!("{err:#}").contains("isn't sharing this"), "{err:#}");
+
+    stranger.close().await;
+    sender.shutdown().await.unwrap();
     receiver.shutdown().await.unwrap();
 }
 
@@ -686,13 +861,13 @@ async fn foreign_shares_with_unsafe_names_are_rejected_before_download() {
         vec!["C:x".to_string()],
     ] {
         let (router, link) = foreign_peer(names.clone()).await;
-        let err = receiver.preview(&link).await.unwrap_err();
+        let err = receiver.preview(&link, None).await.unwrap_err();
         assert!(
             format!("{err:#}").contains("share"),
             "{names:?} gave an unexpected error: {err:#}"
         );
         let started = receiver
-            .start_download(&link, tmp.path().join("dl"))
+            .start_download(&link, None, tmp.path().join("dl"))
             .await
             .unwrap();
         let done = wait_for_end(&receiver, &started.id).await;
@@ -713,7 +888,7 @@ async fn oversized_file_list_is_rejected() {
         .map(|i| format!("d{i:06}/{}", "x".repeat(190)))
         .collect();
     let (router, link) = foreign_peer(names).await;
-    let err = receiver.preview(&link).await.unwrap_err();
+    let err = receiver.preview(&link, None).await.unwrap_err();
     assert!(format!("{err:#}").contains("too large"), "{err:#}");
     router.shutdown().await.unwrap();
     receiver.shutdown().await.unwrap();
@@ -771,8 +946,8 @@ async fn concurrent_starts_of_the_same_download_end_consistently() {
 
     let dest = tmp.path().join("dl");
     let (a, b) = tokio::join!(
-        receiver.start_download(&link, dest.clone()),
-        receiver.start_download(&link, dest.clone())
+        receiver.start_download(&link, None, dest.clone()),
+        receiver.start_download(&link, None, dest.clone())
     );
     let id = a.unwrap().id;
     assert_eq!(b.unwrap().id, id);
@@ -885,11 +1060,48 @@ async fn file_lists_live_outside_the_registry() {
         "the registry only keeps the count"
     );
 
-    // .ferry files carry a capped sample plus the full count.
-    let file = node.share_file(&share.id).unwrap();
-    assert_eq!(file.file_count, 1200);
-    assert_eq!(file.files.len(), ferry_core::MAX_FILES_IN_SHARE_FILE);
-    assert!(ShareLink::parse(&file.to_json()).is_ok());
+    // .ferry files carry only the link: no names or sizes.
+    let path = tmp.path().join("many.ferry");
+    node.save_share_file(&share.id, &path, None).await.unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(bytes.len() < 512, "{} bytes", bytes.len());
+    assert!(!bytes.windows(5).any(|w| w == b"f0001"));
+    let TicketFile::Ready(link) = TicketFile::read(&path).unwrap() else {
+        panic!("an unlocked share's file opens without a password");
+    };
+    assert_eq!(link, ShareLink::parse(&share.link).unwrap());
+    let password = || Some(TicketPassword::from("winter crossing".to_owned()));
+    assert!(
+        node.save_share_file(&share.id, &path, password())
+            .await
+            .is_err(),
+        "only locked shares have encrypted files"
+    );
+    node.set_share_password(&share.id, Some("winter crossing".into()))
+        .await
+        .unwrap();
+    assert!(node.save_share_file(&share.id, &path, None).await.is_err());
+    assert!(
+        node.save_share_file(
+            &share.id,
+            &path,
+            Some(TicketPassword::from("wrong".to_owned()))
+        )
+        .await
+        .is_err()
+    );
+    node.save_share_file(&share.id, &path, password())
+        .await
+        .unwrap();
+    let TicketFile::Protected(protected) = TicketFile::read(&path).unwrap() else {
+        panic!("a locked share's file is encrypted");
+    };
+    assert_eq!(
+        protected
+            .unlock(TicketPassword::from("winter crossing".to_owned()))
+            .unwrap(),
+        link
+    );
 
     node.remove_share(&share.id).await.unwrap();
     assert!(!dir.join(format!("shares/{}.json", share.id)).exists());
@@ -903,7 +1115,7 @@ async fn previews_carry_a_sample_of_names_and_the_full_count() {
     let receiver = node(&tmp.path().join("receiver")).await;
     let names = (0..1000).map(|i| format!("Big/{i:04}.txt")).collect();
     let (router, link) = foreign_peer(names).await;
-    let preview = receiver.preview(&link).await.unwrap();
+    let preview = receiver.preview(&link, None).await.unwrap();
     assert_eq!(preview.file_count, 1000);
     assert_eq!(preview.files.len(), ferry_core::PREVIEW_FILES);
     assert_eq!(preview.total_size, 1000, "every file is the 1-byte blob");

@@ -44,6 +44,8 @@ const activity = {
   receivers: [{ id: 1, doneBytes: 5, totalBytes: 42, bytesPerSec: 2048, etaSecs: 1 }],
 };
 const preview = (name: string): Preview => ({ id: name, name, files: [], fileCount: 0, totalSize: 0 });
+/** What the `preview` command answers when the sender shows the share. */
+const ready = (name: string) => ({ kind: "ready", preview: preview(name) });
 
 /** Default backend: empty lists, no pending links. Tests override single commands. */
 let backend: Record<string, (args: any) => unknown>;
@@ -230,14 +232,14 @@ describe("updates", () => {
 describe("checking links", () => {
   it("keeps only the newest preview when checks overlap", async () => {
     const { receive, checkLink } = await freshStore();
-    let resolveSlow!: (p: Preview) => void;
+    let resolveSlow!: (p: ReturnType<typeof ready>) => void;
     backend.preview = ({ link }: { link: string }) =>
       link === "slow"
-        ? new Promise<Preview>((r) => (resolveSlow = r))
-        : Promise.resolve(preview("fast"));
+        ? new Promise<ReturnType<typeof ready>>((r) => (resolveSlow = r))
+        : Promise.resolve(ready("fast"));
     const slow = checkLink("slow");
     await checkLink("fast");
-    resolveSlow(preview("slow"));
+    resolveSlow(ready("slow"));
     await slow;
     expect(receive.preview?.name).toBe("fast");
     expect(receive.previewLink).toBe("fast");
@@ -247,21 +249,21 @@ describe("checking links", () => {
   it("explains unreachable senders differently from bad links", async () => {
     const { receive, checkLink } = await freshStore();
     backend.preview = () => Promise.reject("could not reach the sender (is their Ferry running?)");
-    await checkLink("ferry://get?t=x");
+    await checkLink("ferry://s#x");
     expect(receive.problem?.title).toMatch(/reach/);
-    backend.preview = () => Promise.reject("invalid share ticket");
+    backend.preview = () => Promise.reject("this is not a Ferry link");
     await checkLink("garbage");
     expect(receive.problem?.title).toMatch(/isn't a Ferry link/);
   });
 
   it("opens links handed over from outside on the Receive screen", async () => {
     const { app, receive } = await freshStore();
-    backend.take_pending_links = () => [{ kind: "link", link: "ferry://get?t=blob" }];
-    backend.preview = () => Promise.resolve(preview("from link"));
+    backend.take_pending_links = () => [{ kind: "link", link: "ferry://s#blob" }];
+    backend.preview = () => Promise.resolve(ready("from link"));
     handlers["ferry-open-link"]({ payload: null });
     await vi.waitFor(() => expect(receive.preview?.name).toBe("from link"));
     expect(app.view).toBe("receive");
-    expect(receive.link).toBe("ferry://get?t=blob");
+    expect(receive.link).toBe("ferry://s#blob");
   });
 
   it("prompts for a protected ticket opened from the desktop and lets the user retry", async () => {
@@ -270,10 +272,10 @@ describe("checking links", () => {
     backend.take_pending_links = () => [{ kind: "file", path }];
     backend.read_share_file = ({ password }) => {
       if (password === null) return { kind: "passwordRequired" };
-      if (password === "correct") return { kind: "ready", link: "ferry://get?t=blob" };
+      if (password === "correct") return { kind: "ready", link: "ferry://s#blob" };
       throw new Error("Incorrect password");
     };
-    backend.preview = () => Promise.resolve(preview("from file"));
+    backend.preview = () => Promise.resolve(ready("from file"));
     handlers["ferry-open-link"]({ payload: null });
     await vi.waitFor(() => expect(receive.protectedTicket).toBe(path));
     expect(app.view).toBe("receive");
@@ -287,6 +289,39 @@ describe("checking links", () => {
     expect(receive.protectedTicket).toBeNull();
     expect(receive.preview?.name).toBe("from file");
     expect(receive.link).toBe("");
+    // The ticket file's password goes on to the sender, which locked the share with it.
+    expect(invoke).toHaveBeenCalledWith("preview", { link: "ferry://s#blob", password: "correct" });
+  });
+
+  it("asks for the password of a locked share and downloads with it", async () => {
+    const { receive, checkLink, startDownload } = await freshStore();
+    backend.preview = ({ password }: { password: string | null }) => {
+      if (password === null) return { kind: "passwordRequired" };
+      if (password === "winter") return ready("locked");
+      if (password === "spam") return { kind: "tooManyGuesses", retryAfterSecs: 8 };
+      return { kind: "wrongPassword" };
+    };
+    backend.start_download = () => ({});
+    await checkLink("ferry://s#locked");
+    expect(receive.lockedLink).toBe("ferry://s#locked");
+    expect(receive.preview).toBeNull();
+    expect(receive.problem).toBeNull();
+
+    await checkLink("ferry://s#locked", "summer");
+    expect(receive.lockedLink).toBe("ferry://s#locked");
+    expect(receive.problem?.title).toMatch(/isn't right/);
+    await checkLink("ferry://s#locked", "spam");
+    expect(receive.problem?.detail).toMatch(/8 seconds/);
+
+    await checkLink("ferry://s#locked", "winter");
+    expect(receive.lockedLink).toBeNull();
+    expect(receive.preview?.name).toBe("locked");
+    await startDownload();
+    expect(invoke).toHaveBeenCalledWith("start_download", {
+      link: "ferry://s#locked",
+      dest: null,
+      password: "winter",
+    });
   });
 });
 
@@ -315,8 +350,8 @@ describe("sharing", () => {
 describe("drag and drop", () => {
   it("opens dropped .ferry files and shares anything else", async () => {
     const { app, receive } = await freshStore();
-    backend.read_share_file = () => ({ kind: "ready", link: "ferry://get?t=blob" });
-    backend.preview = () => Promise.resolve(preview("dropped"));
+    backend.read_share_file = () => ({ kind: "ready", link: "ferry://s#blob" });
+    backend.preview = () => Promise.resolve(ready("dropped"));
     await dropHandler!({ payload: { type: "drop", paths: ["C:/x/trip.ferry"] } });
     expect(app.view).toBe("receive");
     expect(receive.preview?.name).toBe("dropped");

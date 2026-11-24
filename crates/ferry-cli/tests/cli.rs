@@ -29,11 +29,25 @@ impl Drop for Sender {
 
 /// Start `ferry share` and wait for the link it prints.
 fn start_sharing(data_dir: &Path, path: &Path, ticket_file: &Path) -> (Sender, String) {
-    let mut child = ferry(data_dir)
-        .arg("share")
+    start_sharing_with(data_dir, path, ticket_file, None)
+}
+
+/// Like [`start_sharing`], optionally protecting the share with `password`.
+fn start_sharing_with(
+    data_dir: &Path,
+    path: &Path,
+    ticket_file: &Path,
+    password: Option<&str>,
+) -> (Sender, String) {
+    let mut cmd = ferry(data_dir);
+    cmd.arg("share")
         .arg(path)
         .arg("--save-file")
-        .arg(ticket_file)
+        .arg(ticket_file);
+    if let Some(password) = password {
+        cmd.arg("--password").env("FERRY_SHARE_PASSWORD", password);
+    }
+    let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -52,7 +66,7 @@ fn start_sharing(data_dir: &Path, path: &Path, ticket_file: &Path) -> (Sender, S
         let line = rx
             .recv_timeout(left)
             .expect("`ferry share` printed no link");
-        if line.starts_with("https://ferry.xenvaultinteractive.com/get#") {
+        if line.starts_with("https://ferry.xenvaultinteractive.com/s#") {
             return (sender, line);
         }
     }
@@ -113,6 +127,54 @@ fn share_and_get_between_two_processes() {
 }
 
 #[test]
+fn locked_shares_ask_for_the_password() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("plans.txt");
+    std::fs::write(&file, b"top secret plans").unwrap();
+    let ticket = tmp.path().join("plans.ferry");
+    let (_sender, link) = start_sharing_with(
+        &tmp.path().join("a"),
+        &file,
+        &ticket,
+        Some("winter crossing"),
+    );
+    let bytes = std::fs::read(&ticket).unwrap();
+    assert!(
+        !String::from_utf8_lossy(&bytes).contains("plans"),
+        "the ticket file shows nothing"
+    );
+    let dest = tmp.path().join("dl");
+    let get = |source: &std::ffi::OsStr, password: Option<&str>| {
+        let mut cmd = ferry(&tmp.path().join("b"));
+        cmd.arg("get")
+            .arg(source)
+            .arg("--dest")
+            .arg(&dest)
+            .arg("--yes");
+        if let Some(password) = password {
+            cmd.env("FERRY_SHARE_PASSWORD", password);
+        }
+        cmd.stdin(Stdio::null()).output().unwrap()
+    };
+
+    let output = get(link.as_ref(), None);
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(text(&output).contains("password"), "{}", text(&output));
+    let output = get(link.as_ref(), Some("summer"));
+    assert!(!output.status.success());
+    assert!(text(&output).contains("not right"), "{}", text(&output));
+    assert!(!dest.join("plans.txt").exists());
+
+    // The encrypted ticket file opens with the same password, which also unlocks the share.
+    let output = get(ticket.as_os_str(), Some("winter crossing"));
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        std::fs::read(dest.join("plans.txt")).unwrap(),
+        b"top secret plans"
+    );
+}
+
+#[test]
 fn share_reports_what_it_left_out() {
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("Docs");
@@ -129,7 +191,7 @@ fn share_reports_what_it_left_out() {
     let stdout = child.stdout.take().unwrap();
     let mut lines = Vec::new();
     for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-        let done = line.starts_with("https://ferry.xenvaultinteractive.com/get#");
+        let done = line.starts_with("https://ferry.xenvaultinteractive.com/s#");
         lines.push(line);
         if done {
             break;
@@ -155,7 +217,7 @@ fn bad_input_is_an_error_not_a_crash() {
     for (args, expected) in [
         (vec!["unshare", "zz"], "invalid id"),
         (vec!["unshare", &"0".repeat(64)], "unknown share"),
-        (vec!["get", "not a link", "--yes"], "invalid share ticket"),
+        (vec!["get", "not a link", "--yes"], "not a Ferry link"),
     ] {
         let output = ferry(tmp.path()).args(&args).output().unwrap();
         assert_eq!(output.status.code(), Some(1), "{args:?}: {}", text(&output));

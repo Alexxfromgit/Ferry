@@ -1,26 +1,22 @@
-//! Versioned binary `.ferry` files. Version 1 stores a gzip-compressed JSON payload,
-//! optionally wrapped in passphrase-based age encryption.
+//! Binary `.ferry` files: `MAGIC`, a version byte, a kind byte, then the link payload, which
+//! names only the sender's device and the share's token. A file for a password-locked share
+//! is encrypted with that password (age, scrypt), so it reveals nothing without it; the sender
+//! checks the password again when the recipient connects.
 
-use std::{
-    fs::File,
-    io::{Read, Write},
-    path::Path,
-};
+use std::{fs::File, io::Read, path::Path};
 
 use age::secrecy::ExposeSecret;
 pub use age::secrecy::SecretString as TicketPassword;
 use anyhow::{Context, bail, ensure};
-use flate2::{Compression, bufread::GzDecoder, write::GzEncoder};
 
-use crate::{ShareFile, ShareLink, write_atomic};
+use crate::{ShareLink, link::PAYLOAD_MAX, write_atomic};
 
 const MAGIC: &[u8] = b"\x89FERRY\r\n";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 const PLAIN: u8 = 0;
 const PROTECTED: u8 = 1;
-// A capped sample of 1,000 long paths can be several MiB before compression.
-const MAX_PAYLOAD: usize = 8 * 1024 * 1024;
-const MAX_FILE: usize = MAX_PAYLOAD + 64 * 1024; // Allow for compression and encryption overhead.
+/// A protected file is the payload plus age's header and tag; anything this large is not one.
+const MAX_FILE: usize = 4 * 1024;
 // age uses scrypt r=8, p=1. N=2^17 uses 128 MiB on both sender and recipient.
 const SCRYPT_WORK_FACTOR: u8 = 17;
 
@@ -31,22 +27,23 @@ pub enum TicketFile {
 
 pub struct ProtectedTicket(Vec<u8>);
 
-impl ShareFile {
-    /// Save the ticket atomically, optionally protecting the entire payload with a password.
-    pub fn save(&self, path: &Path, password: Option<TicketPassword>) -> anyhow::Result<()> {
-        write_atomic(path, &self.encode(password)?)
-    }
+/// Save a `.ferry` file for `link` atomically, encrypted with `password` if one is given.
+pub fn save_ticket_file(
+    path: &Path,
+    link: &ShareLink,
+    password: Option<TicketPassword>,
+) -> anyhow::Result<()> {
+    write_atomic(path, &encode(link, password)?)
+}
 
-    fn encode(&self, password: Option<TicketPassword>) -> anyhow::Result<Vec<u8>> {
-        let json = serde_json::to_vec(self)?;
-        ensure!(json.len() <= MAX_PAYLOAD, "Ferry ticket is too large");
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&json)?;
-        let compressed = encoder.finish()?;
-
-        let mut bytes = MAGIC.to_vec();
-        bytes.push(VERSION);
-        if let Some(password) = password {
+fn encode(link: &ShareLink, password: Option<TicketPassword>) -> anyhow::Result<Vec<u8>> {
+    let payload = link
+        .to_bytes()
+        .context("a ticket file needs the share's full link")?;
+    let mut bytes = MAGIC.to_vec();
+    bytes.push(VERSION);
+    match password {
+        Some(password) => {
             ensure!(
                 !password.expose_secret().trim().is_empty(),
                 "Enter a password"
@@ -54,18 +51,18 @@ impl ShareFile {
             let mut recipient = age::scrypt::Recipient::new(password);
             recipient.set_work_factor(SCRYPT_WORK_FACTOR);
             bytes.push(PROTECTED);
-            bytes.extend(age::encrypt(&recipient, &compressed)?);
-        } else {
-            bytes.push(PLAIN);
-            bytes.extend(compressed);
+            bytes.extend(age::encrypt(&recipient, &payload)?);
         }
-        ensure!(bytes.len() <= MAX_FILE, "Ferry ticket is too large");
-        Ok(bytes)
+        None => {
+            bytes.push(PLAIN);
+            bytes.extend(payload);
+        }
     }
+    Ok(bytes)
 }
 
 impl TicketFile {
-    /// Open a binary or legacy JSON ticket file, with a bounded read even if the file grows.
+    /// Open a ticket file, with a bounded read even if the file grows.
     pub fn read(path: &Path) -> anyhow::Result<Self> {
         ensure!(path.metadata()?.is_file(), "Choose a Ferry ticket file");
         let file = File::open(path)?;
@@ -82,17 +79,16 @@ impl TicketFile {
     }
 
     fn decode(mut bytes: Vec<u8>) -> anyhow::Result<Self> {
-        ensure!(bytes.len() <= MAX_FILE, "Ferry ticket is too large");
-        let Some(binary) = bytes.strip_prefix(MAGIC) else {
-            let text = std::str::from_utf8(&bytes).context("invalid Ferry ticket file")?;
-            return Ok(Self::Ready(ShareLink::parse(text)?));
-        };
+        ensure!(bytes.len() <= MAX_FILE, "This is not a Ferry ticket file");
+        let binary = bytes
+            .strip_prefix(MAGIC)
+            .context("This is not a Ferry ticket file")?;
         let [version, kind, payload @ ..] = binary else {
             bail!("Incomplete Ferry ticket header");
         };
         ensure!(
             *version == VERSION,
-            "Unsupported Ferry ticket version. Update Ferry to open this file."
+            "This ticket file is from another version of Ferry. Ask the sender for a new one."
         );
         match *kind {
             PLAIN => Ok(Self::Ready(decode_payload(payload)?)),
@@ -124,6 +120,8 @@ impl ProtectedTicket {
         };
         let mut payload = Vec::new();
         reader
+            .by_ref()
+            .take(PAYLOAD_MAX as u64 + 1)
             .read_to_end(&mut payload)
             .context("Damaged protected ticket")?;
         decode_payload(&payload)
@@ -131,66 +129,54 @@ impl ProtectedTicket {
 }
 
 fn decode_payload(payload: &[u8]) -> anyhow::Result<ShareLink> {
-    let mut decoder = GzDecoder::new(payload);
-    let mut json = String::new();
-    (&mut decoder)
-        .take(MAX_PAYLOAD as u64 + 1)
-        .read_to_string(&mut json)
-        .context("Damaged Ferry ticket")?;
-    ensure!(
-        json.len() <= MAX_PAYLOAD,
-        "Ferry ticket payload is too large"
-    );
-    ensure!(
-        decoder.get_ref().is_empty(),
-        "Unexpected data after the Ferry ticket"
-    );
-    ensure!(json.starts_with('{'), "Invalid Ferry ticket payload");
-    ShareLink::parse(&json)
+    ShareLink::from_bytes(payload).context("Damaged Ferry ticket")
 }
 
 #[cfg(test)]
 mod tests {
-    use iroh::{EndpointAddr, SecretKey};
-    use iroh_blobs::{BlobFormat, Hash, ticket::BlobTicket};
+    use iroh::SecretKey;
 
     use super::*;
+    use crate::link::ShareToken;
 
-    fn sample() -> ShareFile {
-        let addr = EndpointAddr::new(SecretKey::generate().public());
-        let ticket = BlobTicket::new(addr, Hash::new(b"hello"), BlobFormat::HashSeq);
-        ShareFile::new(&ticket, "Private photos".into(), 5, &[])
+    fn sample() -> ShareLink {
+        ShareLink::direct(SecretKey::generate().public(), ShareToken::generate())
     }
 
     #[test]
-    fn reads_binary_and_legacy_tickets() {
-        let file = sample();
-        let binary = file.encode(None).unwrap();
-        assert!(std::str::from_utf8(&binary).is_err());
-        for bytes in [binary.clone(), file.to_json().into_bytes()] {
-            let TicketFile::Ready(link) = TicketFile::decode(bytes).unwrap() else {
-                panic!("ordinary tickets open without a password");
-            };
-            assert_eq!(link.ticket.to_string(), file.ticket);
-        }
+    fn plain_files_are_binary_and_hold_only_the_link() {
+        let link = sample();
+        let bytes = encode(&link, None).unwrap();
+        assert_eq!(
+            bytes.len(),
+            MAGIC.len() + 2 + link.to_bytes().unwrap().len()
+        );
+        let TicketFile::Ready(read) = TicketFile::decode(bytes.clone()).unwrap() else {
+            panic!("ordinary tickets open without a password");
+        };
+        assert_eq!(read, link);
 
-        let mut future = binary.clone();
-        future[MAGIC.len()] += 1;
-        assert!(TicketFile::decode(future).is_err());
-        let mut truncated = binary.clone();
+        let mut other_version = bytes.clone();
+        other_version[MAGIC.len()] = 1;
+        assert!(TicketFile::decode(other_version).is_err());
+        let mut truncated = bytes.clone();
         truncated.pop();
         assert!(TicketFile::decode(truncated).is_err());
-        let mut damaged = binary;
-        *damaged.last_mut().unwrap() ^= 1;
-        assert!(TicketFile::decode(damaged).is_err());
+        assert!(TicketFile::decode(b"{\"ticket\": \"x\"}".to_vec()).is_err());
+        assert!(encode(&ShareLink::Code("K7X2QP9A4MZT".into()), None).is_err());
     }
 
     #[test]
     fn protected_ticket_requires_password_and_detects_tampering() {
-        let file = sample();
+        let link = sample();
         let password = "  海 — winter crossing  ";
         let password = || TicketPassword::from(password.to_owned());
-        let bytes = file.encode(Some(password())).unwrap();
+        let bytes = encode(&link, Some(password())).unwrap();
+        let payload = link.to_bytes().unwrap();
+        assert!(
+            !bytes.windows(payload.len()).any(|w| w == payload),
+            "the link must not appear in the clear"
+        );
         let TicketFile::Protected(ticket) = TicketFile::decode(bytes).unwrap() else {
             panic!("protected tickets require a password");
         };
@@ -198,10 +184,7 @@ mod tests {
             .unlock(TicketPassword::from("wrong".to_owned()))
             .unwrap_err();
         assert!(wrong_password.to_string().contains("Incorrect password"));
-        assert_eq!(
-            ticket.unlock(password()).unwrap().ticket.to_string(),
-            file.ticket
-        );
+        assert_eq!(ticket.unlock(password()).unwrap(), link);
 
         let mut damaged = ticket;
         *damaged.0.last_mut().unwrap() ^= 1;

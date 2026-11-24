@@ -6,6 +6,15 @@ use tokio::sync::oneshot;
 
 use super::*;
 
+/// A bare sender that lets every device fetch one share.
+struct OpenToAll(Hash);
+
+impl protocol::Handler for OpenToAll {
+    async fn open(&self, _remote: EndpointId, _request: OpenRequest) -> OpenResponse {
+        OpenResponse::Ok { hash: self.0 }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn interrupted_download_resumes_after_restart() {
     let tmp = tempfile::tempdir().unwrap();
@@ -44,7 +53,7 @@ async fn interrupted_download_resumes_after_restart() {
     }));
     let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
-        .alpns(vec![iroh_blobs::ALPN.to_vec()])
+        .alpns(vec![iroh_blobs::ALPN.to_vec(), protocol::ALPN.to_vec()])
         .bind()
         .await
         .unwrap();
@@ -53,18 +62,19 @@ async fn interrupted_download_resumes_after_restart() {
             iroh_blobs::ALPN,
             BlobsProtocol::new(&store, Some(event_sender)),
         )
+        .accept(
+            protocol::ALPN,
+            protocol::Protocol::new(Arc::new(OpenToAll(root.hash()))),
+        )
         .spawn();
-    let link = ShareLink::new(BlobTicket::new(
-        sender.endpoint().addr(),
-        root.hash(),
-        BlobFormat::HashSeq,
-    ));
+    let addrs: Vec<_> = sender.endpoint().addr().ip_addrs().copied().collect();
+    let link = ShareLink::with_addrs(sender.endpoint().id(), ShareToken::generate(), &addrs);
 
     let mut config = Config::local_only(tmp.path().join("receiver"));
     config.resume_downloads = false;
     let receiver = Node::start(config.clone()).await.unwrap();
     let started = receiver
-        .start_download(&link, tmp.path().join("dl"))
+        .start_download(&link, None, tmp.path().join("dl"))
         .await
         .unwrap();
     // Network progress can precede the store write. Watch the actual file's verified ranges.

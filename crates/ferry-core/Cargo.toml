@@ -9,7 +9,11 @@ rust-version.workspace = true
 [dependencies]
 age = "0.12.1"
 anyhow.workspace = true
-flate2 = "1"
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "password-hash"] }
+blake3 = "1"
+data-encoding = "2"
+getrandom = "0.3"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 iroh.workspace = true
 iroh-blobs.workspace = true
 irpc.workspace = true

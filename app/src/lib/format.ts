@@ -30,6 +30,11 @@ export function exactCount(n: number): string {
   return n.toLocaleString("en");
 }
 
+/** A share code grouped for reading aloud or typing: `K7X2-QP9A-4MZT`. */
+export function formatCode(code: string): string {
+  return code.match(/.{1,4}/g)?.join("-") ?? code;
+}
+
 export function plural(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }

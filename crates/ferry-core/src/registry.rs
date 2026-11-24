@@ -4,13 +4,17 @@
 //! own file (`shares/<id>.json`), so this registry stays small however many files are shared.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 
-use crate::{events::ConnectionKind, link::FileEntry, util};
+use crate::{
+    events::ConnectionKind,
+    link::{FileEntry, ShareToken},
+    util,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,11 +29,15 @@ pub struct ShareInfo {
     pub file_count: usize,
     pub total_size: u64,
     pub created_at: u64,
-    /// Filled in with the node's current address whenever a share is read (empty on disk).
+    /// Filled in whenever a share is read (empty on disk): the link to send.
     #[serde(default)]
     pub link: String,
+    /// The share's short code (`K7X2QP9A4MZT`), filled in like `link`.
     #[serde(default)]
-    pub ticket: String,
+    pub code: String,
+    /// Whether recipients need a password, filled in like `link`.
+    #[serde(default)]
+    pub locked: bool,
     /// Items in the selection that were not shared, so the user can be told. At most
     /// [`MAX_SKIPPED_LISTED`] are listed; `skipped_count` is the full number.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -98,7 +106,8 @@ impl DownloadStatus {
 pub struct DownloadInfo {
     /// Hex BLAKE3 hash of the collection root; also the download id.
     pub id: String,
-    pub ticket: String,
+    /// The sender's full link (device and share token), used to reconnect when resuming.
+    pub link: String,
     pub dest_dir: PathBuf,
     pub name: String,
     pub status: DownloadStatus,
@@ -129,6 +138,37 @@ pub struct Registry {
     pub shares: Vec<ShareInfo>,
     #[serde(default)]
     pub downloads: Vec<DownloadInfo>,
+    /// Who may fetch each share (share id → access), kept apart from [`ShareInfo`] so the
+    /// secrets in it never reach the UI.
+    #[serde(default)]
+    pub access: BTreeMap<String, ShareAccess>,
+}
+
+/// The secrets that guard one share.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareAccess {
+    /// Named by the share's link; whoever presents it may ask for the share.
+    pub token: ShareToken,
+    /// Argon2id hash (PHC string) of the share's password, if it is locked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// Devices (endpoint ids, hex) that presented the token, and the password if one was set.
+    /// They may fetch the share until it is removed or its password changes, so downloads
+    /// resume without asking again.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub grants: BTreeSet<String>,
+}
+
+impl ShareAccess {
+    /// Access for a new share: a fresh token, no password, nobody granted yet.
+    pub fn generate() -> Self {
+        Self {
+            token: ShareToken::generate(),
+            password: None,
+            grants: BTreeSet::new(),
+        }
+    }
 }
 
 /// File lists found inside a registry written by an older version (share id → files). They are
@@ -177,7 +217,8 @@ impl Registry {
         let mut copy = self.clone();
         for share in &mut copy.shares {
             share.link.clear();
-            share.ticket.clear();
+            share.code.clear();
+            share.locked = false;
         }
         for download in &mut copy.downloads {
             download.bytes_per_sec = 0;
@@ -364,12 +405,14 @@ mod size_probe {
                 total_size: 0,
                 created_at: 0,
                 link: String::new(),
-                ticket: String::new(),
+                code: String::new(),
+                locked: false,
                 skipped: Vec::new(),
                 skipped_count: 0,
                 paused: false,
             }],
             downloads: Vec::new(),
+            access: BTreeMap::new(),
         };
         let dir = tempfile::tempdir().unwrap();
         let lists = FileLists::new(dir.path().join("shares"));

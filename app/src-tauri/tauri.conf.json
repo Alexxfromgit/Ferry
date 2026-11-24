@@ -116,8 +116,11 @@
             "https"
           ],
           "host": "ferry.xenvaultinteractive.com",
+          "path": [
+            "/s"
+          ],
           "pathPrefix": [
-            "/get"
+            "/s/"
           ],
           "appLink": true
         },
@@ -125,7 +128,7 @@
           "scheme": [
             "ferry"
           ],
-          "host": "get",
+          "host": "s",
           "appLink": false
         }
       ],

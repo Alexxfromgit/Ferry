@@ -60,9 +60,13 @@ export const receive = $state({
   checking: false,
   openingTicket: false,
   protectedTicket: null as string | null,
+  /** A link whose sender asks for a password before showing anything. */
+  lockedLink: null as string | null,
   preview: null as Preview | null,
   /** The link text the preview was made from. */
   previewLink: "",
+  /** The password the preview was let in with, if the share asked for one. */
+  previewPassword: undefined as string | undefined,
   problem: null as { title: string; detail: string } | null,
   dest: null as string | null,
   starting: false,
@@ -248,7 +252,8 @@ export async function openTicket(path: string, password?: string) {
     if (ticket.kind === "passwordRequired") {
       receive.protectedTicket = path;
     } else {
-      await checkLink(ticket.link);
+      // A locked share's ticket file is encrypted with the share's own password.
+      await checkLink(ticket.link, password);
     }
   } catch (err) {
     if (token !== checkToken) return;
@@ -261,20 +266,46 @@ export async function openTicket(path: string, password?: string) {
   }
 }
 
-/** Contact the sender and show what the link contains. Only the latest check wins. */
-export async function checkLink(text: string) {
+/** Contact the sender and show what the link contains, with the share's password if it asked
+ * for one. Only the latest check wins. */
+export async function checkLink(text: string, password?: string) {
   if (!text.trim()) return;
   const token = ++checkToken;
   receive.openingTicket = false;
   receive.protectedTicket = null;
+  // Keep the password form up while a typed password is checked.
+  if (password === undefined || receive.lockedLink !== text) receive.lockedLink = null;
   receive.checking = true;
   receive.problem = null;
   receive.preview = null;
   try {
-    const preview = await api.preview(text);
+    const outcome = await api.preview(text, password);
     if (token !== checkToken) return;
-    receive.preview = preview;
-    receive.previewLink = text;
+    switch (outcome.kind) {
+      case "ready":
+        receive.lockedLink = null;
+        receive.preview = outcome.preview;
+        receive.previewLink = text;
+        receive.previewPassword = password;
+        break;
+      case "passwordRequired":
+        receive.lockedLink = text;
+        break;
+      case "wrongPassword":
+        receive.lockedLink = text;
+        receive.problem = {
+          title: "That password isn't right.",
+          detail: "Check it with the sender and try again.",
+        };
+        break;
+      case "tooManyGuesses":
+        receive.lockedLink = text;
+        receive.problem = {
+          title: "Too many wrong passwords.",
+          detail: `The sender's Ferry takes no more guesses for now. Try again in ${plural(outcome.retryAfterSecs, "second", "seconds")}.`,
+        };
+        break;
+    }
   } catch (err) {
     if (token !== checkToken) return;
     const detail = message(err);
@@ -294,9 +325,11 @@ export function clearPreview() {
   checkToken++;
   receive.preview = null;
   receive.previewLink = "";
+  receive.previewPassword = undefined;
   receive.checking = false;
   receive.openingTicket = false;
   receive.protectedTicket = null;
+  receive.lockedLink = null;
   receive.problem = null;
   receive.dest = null;
 }
@@ -305,7 +338,7 @@ export async function startDownload() {
   if (!receive.preview || receive.starting) return;
   receive.starting = true;
   try {
-    await api.startDownload(receive.previewLink, receive.dest ?? undefined);
+    await api.startDownload(receive.previewLink, receive.dest ?? undefined, receive.previewPassword);
     toast(`Downloading ${receive.preview.name}`);
     receive.link = "";
     clearPreview();
