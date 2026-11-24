@@ -96,7 +96,8 @@ const fakeQr = (() => {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 25 25" fill="#2A0D20">${cells}</svg>`;
 })();
 
-// ?empty starts with nothing shared or downloaded; ?slow holds the startup splash for 2 seconds.
+// ?empty starts with nothing shared or downloaded; ?slow makes starting take 2 seconds, longer
+// than the startup intro.
 // ?mobile previews the phone build.
 const params = new URLSearchParams(location.search);
 const empty = params.has("empty");

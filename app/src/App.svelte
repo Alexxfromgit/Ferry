@@ -12,6 +12,10 @@
   import Splash from "./lib/Splash.svelte";
   import { motion } from "./lib/motion";
 
+  /** Set once the startup intro has had its minimum time; it stays up while init runs on. */
+  let introDone = $state(false);
+  const splashing = $derived(!app.ready || !introDone);
+
   onMount(() => {
     init()
       .catch((err) => toast(`Ferry couldn't start: ${message(err)}`, true))
@@ -98,7 +102,7 @@
   <Scene mode={sceneMode} phone={isMobile()} />
 {/if}
 
-<div class="shell" class:phone={isMobile()}>
+<div class="shell" class:phone={isMobile()} inert={splashing}>
   <nav class="glass" aria-label="Main">
     <div class="brand">
       <img src="/ferry-icon.png" alt="" width="40" height="40" />
@@ -166,8 +170,8 @@
 <!-- Always mounted: a live region added together with its text is often not announced. -->
 <p class="sr-only" role="status">{app.dragging ? `${drop.title}. ${drop.detail}` : ""}</p>
 
-{#if !app.ready}
-  <Splash artwork={app.showArtwork === true} />
+{#if splashing}
+  <Splash artwork={app.showArtwork} phone={isMobile()} ready={app.ready} ondone={() => (introDone = true)} />
 {/if}
 
 <style>

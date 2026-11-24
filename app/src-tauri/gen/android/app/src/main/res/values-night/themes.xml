@@ -1,6 +1,15 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <!-- Base application theme. -->
+    <!-- Base application theme. Ferry's UI is always dark, so the window behind the WebView is
+         too (values/themes.xml is the same). -->
     <style name="Theme.ferry_desktop" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <item name="android:windowBackground">@color/ferry_night</item>
+    </style>
+
+    <!-- MainActivity's theme while it starts: the system splash is the night background with no
+         icon, and hands off to the web UI's branded intro (see Splash.svelte). -->
+    <style name="Theme.ferry.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/ferry_night</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/splash_blank</item>
+        <item name="postSplashScreenTheme">@style/Theme.ferry_desktop</item>
     </style>
 </resources>

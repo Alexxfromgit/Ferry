@@ -441,6 +441,20 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// Set once the main window has been shown at startup.
+#[cfg(desktop)]
+static STARTUP_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The main window starts hidden (tauri.conf.json) so it never shows a blank frame; it appears
+/// once its page has loaded, which means the splash is already on screen. Only the first time:
+/// a later reload must not bring back a window hidden to the tray.
+#[cfg(desktop)]
+fn show_at_startup(app: &AppHandle) {
+    if !STARTUP_SHOWN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        show_main(app);
+    }
+}
+
 fn forward_events(app: AppHandle, node: &Node) {
     let mut rx = node.subscribe();
     tauri::async_runtime::spawn(async move {
@@ -785,6 +799,15 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     #[cfg(desktop)]
     build_tray(app)?;
+    // In case the page never reports that it loaded, the window still appears.
+    #[cfg(desktop)]
+    {
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            show_at_startup(&handle);
+        });
+    }
 
     // Register ferry:// for this executable (installers do this too; needed for dev builds
     // and AppImages).
@@ -847,6 +870,16 @@ pub fn run() {
     let app = app
         .plugin(tauri_plugin_ferry_mobile::init())
         .plugin(android_updates::init());
+    #[cfg(desktop)]
+    let app = app.on_page_load(|webview, payload| {
+        // Not when startup failed: its error dialog is all there is to show.
+        if payload.event() == tauri::webview::PageLoadEvent::Finished
+            && webview.label() == "main"
+            && webview.try_state::<AppState>().is_some()
+        {
+            show_at_startup(webview.app_handle());
+        }
+    });
     let app = app
         .setup(setup)
         .on_window_event(|window, event| {
