@@ -69,7 +69,7 @@ beforeEach(() => {
     node_status: () => ({ nodeId: "n", directAddresses: [] }),
     take_pending_links: () => [],
     app_info: () => ({ platform: "linux", mobile: false, distribution: "desktop" }),
-    get_settings: () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: true }),
+    get_settings: () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: false }),
   };
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string, args: unknown) => {

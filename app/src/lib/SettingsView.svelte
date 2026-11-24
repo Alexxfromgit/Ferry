@@ -112,7 +112,7 @@
         <input type="checkbox" bind:checked={settings.showArtwork} onchange={persist} />
         <span>
           Show artwork
-          <span class="muted hint">The Ferry mascot behind the app. Turn it off for a plainer look, e.g. when sharing your screen.</span>
+          <span class="muted hint">The Ferry mascot behind the app. Off by default for a plainer look; turn it on to see her behind every screen.</span>
         </span>
       </label>
     </section>

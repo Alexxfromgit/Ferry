@@ -1027,6 +1027,30 @@ mod tests {
     }
 
     #[test]
+    fn artwork_is_off_without_readable_settings() {
+        let dir = tempfile_dir();
+        let missing = load_settings(&dir.join("no-such-settings.json"), std::env::temp_dir());
+        assert!(!missing.show_artwork);
+        let corrupt = dir.join("corrupt-settings.json");
+        std::fs::write(&corrupt, "{ not json").unwrap();
+        assert!(!load_settings(&corrupt, std::env::temp_dir()).show_artwork);
+    }
+
+    #[test]
+    fn artwork_stays_on_once_turned_on() {
+        let dir = tempfile_dir();
+        let path = dir.join("artwork-on-settings.json");
+        let json = serde_json::json!({
+            "downloadDir": dir,
+            "relay": { "mode": "default" },
+            "closeToTray": true,
+            "showArtwork": true,
+        });
+        std::fs::write(&path, json.to_string()).unwrap();
+        assert!(load_settings(&path, std::env::temp_dir()).show_artwork);
+    }
+
+    #[test]
     fn legacy_dirs_swap_only_the_identifier() {
         let id = "com.xenvaultinteractive.ferry";
         let new = Path::new("data").join(id).join("logs");

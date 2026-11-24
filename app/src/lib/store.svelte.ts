@@ -45,7 +45,7 @@ export const app = $state({
   /** False until `init` has finished, while the startup splash shows. */
   ready: false,
   /** Mirrors the saved setting, so the backdrop can follow it without reloading settings.
-   *  Null until it has loaded, so artwork never shows to someone who turned it off. */
+   *  Null until it has loaded; artwork shows only once the saved setting turns it on. */
   showArtwork: null as boolean | null,
   toast: null as { text: string; error: boolean } | null,
   /** Bumped when share links may have changed (e.g. the relay connected); QR codes refetch. */
