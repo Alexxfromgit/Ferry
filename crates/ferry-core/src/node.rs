@@ -74,9 +74,9 @@ const LINK_REFRESH: Duration = Duration::from_secs(12 * 60 * 60);
 /// How soon a failed registration is tried again at first; the wait doubles up to an hour.
 const LINK_RETRY: Duration = Duration::from_secs(120);
 const LINK_RETRY_MAX: Duration = Duration::from_secs(60 * 60);
-/// The pause between registrations, so a device with many shares stays under the service's
-/// limit of 60 requests a minute and leaves room for lookups from the same network.
-const LINK_PACE: Duration = Duration::from_millis(1500);
+/// The pause between registrations (and removals), so a device with many shares stays under the
+/// service's limit of 10 a minute per network, with room to spare for other devices there.
+const LINK_PACE: Duration = Duration::from_secs(7);
 
 fn share_tag(hash: &Hash) -> String {
     format!("ferry/share/{}", hash.to_hex())
@@ -657,12 +657,14 @@ impl Node {
             .collect();
         self.inner.short_links.lock().unwrap().clear();
         let secret = self.endpoint().secret_key().clone();
-        for token in tokens {
+        for (i, token) in tokens.into_iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(LINK_PACE).await;
+            }
             let code = crate::link::share_code(&secret.public(), &token);
             if let Err(e) = service.delete(&secret, &code, util::now_unix()).await {
                 tracing::warn!("could not remove a short link: {e:#}");
             }
-            tokio::time::sleep(LINK_PACE).await;
         }
     }
 
