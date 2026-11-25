@@ -39,8 +39,8 @@ Every release lists its checksums in `SHA256SUMS.txt` and carries GitHub build a
   encrypted relay passes the data along without being able to read it.
 - **Resumes.** An interrupted download picks up where it stopped.
 - **Share it your way.** A short link like `ferry.xenvaultinteractive.com/s/K7X2-QP9A-4MZT`, a
-  QR code, or a `.ferry` ticket file. Links name your device and the share, never your IP
-  address. [Share links](docs/LINKS.md)
+  QR code, or a `.ferry` ticket file. Links name your device and the share, not your IP
+  address (unless relays are turned off). [Share links](docs/LINKS.md)
 - **Passwords.** Lock a share with a password; your Ferry checks it before anyone gets in.
 - **Phones too.** On Android, share to Ferry from any app's Share menu, scan a QR code to receive,
   and find received files in Downloads/Ferry.
@@ -58,7 +58,7 @@ Every release lists its checksums in `SHA256SUMS.txt` and carries GitHub build a
 
 Treat links like keys. Anyone with an active link can download the share unless it has a
 password. A link names the sender's device and a random token for the share; it carries no IP
-addresses (unless relays are turned off). Ferry publishes each device's home relay, not its IP
+addresses, unless relays are turned off, when it has to carry the sender's direct addresses. Ferry publishes each device's home relay, not its IP
 addresses, through iroh's public discovery service so links keep working when a device changes
 networks. Turn sharing off to stop access. [How Ferry connects](docs/NETWORKING.md)
 

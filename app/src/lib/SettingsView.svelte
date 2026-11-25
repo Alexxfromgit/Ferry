@@ -155,9 +155,11 @@
         <span>
           Short links
           <span class="muted hint">
-            Links like ferry.xenvaultinteractive.com/s/K7X2-QP9A-4MZT, through Ferry's link service. It
-            stores only your device ID and the share's code, never files or IP addresses. Off: longer
-            links that work without it. Needs relays.
+            Links like ferry.xenvaultinteractive.com/s/K7X2-QP9A-4MZT, through Ferry's link service. For
+            each share it stores your device ID, the share's code and token, and your relay: whoever
+            runs it could open shares that have no password, like anyone with the link. It never
+            stores files, file names or IP addresses. Off: longer links that work without it, and
+            your existing short links stop working. Needs relays.
           </span>
         </span>
       </label>

@@ -213,7 +213,9 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                 }
             }
             println!("\nsend this link to the recipient:\n\n{}\n", share.link);
-            println!("share code: {}", format_code(&share.code));
+            if share.link.contains("/s/") {
+                println!("share code: {}", format_code(&share.code));
+            }
             if share.locked {
                 println!("recipients need the password; send it separately.");
             }

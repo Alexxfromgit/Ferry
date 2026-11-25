@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, bail, ensure};
-use iroh::{EndpointId, RelayUrl, SecretKey};
+use iroh::{EndpointId, RelayUrl, SecretKey, Signature};
 use serde::{Deserialize, Serialize};
 
 use crate::link::{ShareToken, share_code};
@@ -59,6 +59,11 @@ struct LookupAnswer {
     endpoint: String,
     token: String,
     relay: Option<String>,
+    /// The registration's own expiry and signature, so the relay can be checked too.
+    #[serde(default)]
+    expires: Option<u64>,
+    #[serde(default)]
+    sig: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -99,7 +104,10 @@ impl LinkService {
     ) -> anyhow::Result<String> {
         let endpoint = secret.public();
         let code = share_code(&endpoint, token);
-        let relay = relay.map(|r| r.to_string());
+        // The service takes https relays only; any other is left out rather than failing.
+        let relay = relay
+            .filter(|r| r.scheme() == "https")
+            .map(|r| r.to_string());
         let message = register_message(&code, &endpoint, token, relay.as_deref(), expires);
         let body = RegisterBody {
             endpoint: hex::encode(endpoint.as_bytes()),
@@ -115,6 +123,8 @@ impl LinkService {
             .body(serde_json::to_vec(&body)?)
             .send()
             .await
+            // Errors would name the URL, which holds the code; keep that out of logs.
+            .map_err(reqwest::Error::without_url)
             .context("could not reach the link service")?;
         check(response).await?;
         Ok(code)
@@ -136,6 +146,8 @@ impl LinkService {
             .body(serde_json::to_vec(&body)?)
             .send()
             .await
+            // Errors would name the URL, which holds the code; keep that out of logs.
+            .map_err(reqwest::Error::without_url)
             .context("could not reach the link service")?;
         check(response).await?;
         Ok(())
@@ -148,6 +160,7 @@ impl LinkService {
             .get(self.url(code))
             .send()
             .await
+            .map_err(reqwest::Error::without_url)
             .context("could not reach the link service to look up this short link")?;
         let body = check(response).await?;
         let answer: LookupAnswer =
@@ -169,9 +182,29 @@ impl LinkService {
             share_code(&endpoint, &token) == code,
             "the link service gave an answer that doesn't belong to this link"
         );
-        // A relay that can't be parsed is only a hint; the device is still found through
+        // The relay is used only if the device signed it: otherwise the service could steer
+        // recipients to a relay of its choosing. Without it, the device is still found through
         // address lookup.
-        let relay = answer.relay.and_then(|r| r.parse().ok());
+        let signed = match (&answer.sig, answer.expires) {
+            (Some(sig), Some(expires)) => {
+                let message =
+                    register_message(code, &endpoint, &token, answer.relay.as_deref(), expires);
+                hex::decode(sig)
+                    .ok()
+                    .and_then(|b| <[u8; 64]>::try_from(b).ok())
+                    .is_some_and(|b| {
+                        endpoint
+                            .verify(&message, &Signature::from_bytes(&b))
+                            .is_ok()
+                    })
+            }
+            _ => false,
+        };
+        let relay = if signed {
+            answer.relay.and_then(|r| r.parse().ok())
+        } else {
+            None
+        };
         Ok(Resolved {
             endpoint,
             token,
@@ -181,18 +214,26 @@ impl LinkService {
 }
 
 /// The body of a successful answer, or an error saying what the service said.
-async fn check(response: reqwest::Response) -> anyhow::Result<Vec<u8>> {
+async fn check(mut response: reqwest::Response) -> anyhow::Result<Vec<u8>> {
     let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .context("the link service's answer was cut off")?;
+    let too_large = "the link service's answer is too large";
     ensure!(
-        body.len() <= MAX_ANSWER,
-        "the link service's answer is too large"
+        response.content_length().unwrap_or(0) <= MAX_ANSWER as u64,
+        too_large
     );
+    // Read no more than the limit, whatever the answer claims.
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(reqwest::Error::without_url)
+        .context("the link service's answer was cut off")?
+    {
+        ensure!(body.len() + chunk.len() <= MAX_ANSWER, too_large);
+        body.extend_from_slice(&chunk);
+    }
     if status.is_success() {
-        return Ok(body.to_vec());
+        return Ok(body);
     }
     let said = serde_json::from_slice::<ErrorAnswer>(&body)
         .map(|e| e.error)
@@ -265,6 +306,8 @@ pub(crate) mod tests {
     pub struct MockService {
         pub links: Arc<Mutex<HashMap<String, serde_json::Value>>>,
         pub lie: Arc<Mutex<bool>>,
+        /// Answer lookups with this relay instead of the signed one.
+        pub swap_relay: Arc<Mutex<Option<String>>>,
     }
 
     impl MockService {
@@ -332,7 +375,13 @@ pub(crate) mod tests {
                         link["token"] = hex::encode(ShareToken::generate().0).into();
                         (200, link.to_string())
                     }
-                    Some(link) => (200, link.to_string()),
+                    Some(link) => {
+                        let mut link = link.clone();
+                        if let Some(relay) = self.swap_relay.lock().unwrap().clone() {
+                            link["relay"] = relay.into();
+                        }
+                        (200, link.to_string())
+                    }
                     None => (
                         404,
                         r#"{"error":"This link doesn't exist or has expired."}"#.into(),
@@ -358,6 +407,7 @@ pub(crate) mod tests {
                     }
                     let link = serde_json::json!({
                         "endpoint": body["endpoint"], "token": body["token"], "relay": body["relay"],
+                        "expires": body["expires"], "sig": body["sig"],
                     });
                     self.links.lock().unwrap().insert(code, link);
                     (204, String::new())
@@ -449,6 +499,19 @@ pub(crate) mod tests {
                 relay: Some(relay)
             }
         );
+
+        // A relay the device didn't sign is left out.
+        *mock.swap_relay.lock().unwrap() = Some("https://evil.example.com/".into());
+        assert_eq!(service.resolve(&code).await.unwrap().relay, None);
+        *mock.swap_relay.lock().unwrap() = None;
+
+        // A relay other than https is left out of the registration, not refused.
+        let http_relay: RelayUrl = "http://10.0.0.5:3340".parse().unwrap();
+        service
+            .register(&secret, &token, Some(&http_relay), 4_000_000_000)
+            .await
+            .unwrap();
+        assert_eq!(service.resolve(&code).await.unwrap().relay, None);
 
         // A service that points the code at something else is caught.
         *mock.lie.lock().unwrap() = true;

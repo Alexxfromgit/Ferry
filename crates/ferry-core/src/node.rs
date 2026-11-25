@@ -71,8 +71,12 @@ const IMPORT_PARALLELISM: usize = 4;
 pub const PREVIEW_FILES: usize = 200;
 /// How often short links are registered again, so they never expire while a share exists.
 const LINK_REFRESH: Duration = Duration::from_secs(12 * 60 * 60);
-/// How soon a failed registration is tried again.
+/// How soon a failed registration is tried again at first; the wait doubles up to an hour.
 const LINK_RETRY: Duration = Duration::from_secs(120);
+const LINK_RETRY_MAX: Duration = Duration::from_secs(60 * 60);
+/// The pause between registrations, so a device with many shares stays under the service's
+/// limit of 60 requests a minute and leaves room for lookups from the same network.
+const LINK_PACE: Duration = Duration::from_millis(1500);
 
 fn share_tag(hash: &Hash) -> String {
     format!("ferry/share/{}", hash.to_hex())
@@ -601,24 +605,65 @@ impl Node {
         }
         let relay: Option<RelayUrl> = self.endpoint().addr().relay_urls().next().cloned();
         let expires = util::now_unix() + LINK_LIFETIME.as_secs();
-        service
-            .register(
-                self.endpoint().secret_key(),
-                &token,
-                relay.as_ref(),
-                expires,
-            )
+        let secret = self.endpoint().secret_key();
+        let code = service
+            .register(secret, &token, relay.as_ref(), expires)
             .await?;
-        let newly = self
-            .inner
-            .short_links
-            .lock()
-            .unwrap()
-            .insert(id.to_string());
-        if newly && let Some(share) = self.share(id) {
-            self.emit(Event::ShareUpdated { share });
+        // The share may have been removed while this was under way, and its code removed from
+        // the service before it arrived there. Checked and marked under the registry lock, which
+        // a removal also takes: either the removal comes after this and removes the code again,
+        // or this sees it and does so.
+        let newly = {
+            let registry = self.inner.registry.lock().unwrap();
+            let still_shared = registry.access.get(id).is_some_and(|a| a.token == token);
+            if still_shared {
+                Some(
+                    self.inner
+                        .short_links
+                        .lock()
+                        .unwrap()
+                        .insert(id.to_string()),
+                )
+            } else {
+                None
+            }
+        };
+        match newly {
+            None => service.delete(secret, &code, util::now_unix()).await?,
+            Some(true) => {
+                if let Some(share) = self.share(id) {
+                    self.emit(Event::ShareUpdated { share });
+                }
+            }
+            Some(false) => {}
         }
         Ok(())
+    }
+
+    /// Remove every short link this device registered, for when short links are turned off.
+    /// Waits for the service (a few seconds at most per link).
+    pub async fn remove_short_links(&self) {
+        let Some(service) = self.inner.links.clone() else {
+            return;
+        };
+        let tokens: Vec<ShareToken> = self
+            .inner
+            .registry
+            .lock()
+            .unwrap()
+            .access
+            .values()
+            .map(|a| a.token)
+            .collect();
+        self.inner.short_links.lock().unwrap().clear();
+        let secret = self.endpoint().secret_key().clone();
+        for token in tokens {
+            let code = crate::link::share_code(&secret.public(), &token);
+            if let Err(e) = service.delete(&secret, &code, util::now_unix()).await {
+                tracing::warn!("could not remove a short link: {e:#}");
+            }
+            tokio::time::sleep(LINK_PACE).await;
+        }
     }
 
     fn add_link_job(&self, task: tokio::task::JoinHandle<()>) {
@@ -1719,31 +1764,47 @@ impl Node {
     }
 }
 
-/// Keep every short link registered: at start, then every [`LINK_REFRESH`] (sooner after a
-/// failure). Stops when the node is gone.
+/// Keep every short link registered: at start, then every [`LINK_REFRESH`]. Registrations are
+/// paced, and only the ones that failed are tried again, sooner at first and then less often.
+/// Stops when the node is gone.
 async fn refresh_short_links(node: Weak<Inner>) {
+    let mut retry: Option<(Vec<String>, Duration)> = None;
     loop {
         let Some(inner) = node.upgrade() else { return };
         let node_now = Node { inner };
-        let ids: Vec<String> = node_now
-            .inner
-            .registry
-            .lock()
-            .unwrap()
-            .shares
-            .iter()
-            .filter(|s| !s.paused)
-            .map(|s| s.id.clone())
-            .collect();
-        let mut failed = false;
-        for id in ids {
+        let ids: Vec<String> = match &retry {
+            Some((failed, _)) => failed.clone(),
+            None => node_now
+                .inner
+                .registry
+                .lock()
+                .unwrap()
+                .shares
+                .iter()
+                .filter(|s| !s.paused)
+                .map(|s| s.id.clone())
+                .collect(),
+        };
+        let mut failed = Vec::new();
+        for (i, id) in ids.into_iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(LINK_PACE).await;
+            }
             if let Err(e) = node_now.try_register_short_link(&id).await {
                 tracing::warn!(%id, "could not refresh a short link: {e:#}");
-                failed = true;
+                failed.push(id);
             }
         }
         drop(node_now);
-        tokio::time::sleep(if failed { LINK_RETRY } else { LINK_REFRESH }).await;
+        let wait = if failed.is_empty() {
+            retry = None;
+            LINK_REFRESH
+        } else {
+            let wait = retry.map_or(LINK_RETRY, |(_, last)| (last * 2).min(LINK_RETRY_MAX));
+            retry = Some((failed, wait));
+            wait
+        };
+        tokio::time::sleep(wait).await;
     }
 }
 

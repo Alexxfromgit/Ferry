@@ -348,6 +348,12 @@ fn set_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult
     save_settings(&state.settings_path, &settings)?;
     let restart = settings.relay != *state.node.relay()
         || settings.short_links != state.node.uses_link_service();
+    // Turning short links off also takes the existing ones off the link service, while this
+    // run still talks to it.
+    if saved.short_links && !settings.short_links {
+        let node = state.node.clone();
+        tauri::async_runtime::spawn(async move { node.remove_short_links().await });
+    }
     *saved = settings;
     Ok(restart)
 }

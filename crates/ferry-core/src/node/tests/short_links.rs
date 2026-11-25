@@ -93,3 +93,31 @@ async fn without_relays_or_another_way_to_find_devices_links_stay_full() {
     assert!(sender.share(&share.id).unwrap().link.contains("/s#"));
     sender.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn turning_short_links_off_removes_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mock = MockService::default();
+    let base = mock.start().await;
+    let book = MemoryLookup::new();
+    let sender = node_with(&tmp.path().join("sender"), Some(&base), &book).await;
+    for name in ["a.txt", "b.txt"] {
+        let file = tmp.path().join(name);
+        std::fs::write(&file, name).unwrap();
+        sender.create_share(vec![file]).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while mock.links.lock().unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("both short links were registered");
+
+    sender.remove_short_links().await;
+    assert!(mock.links.lock().unwrap().is_empty());
+    for share in sender.list_shares() {
+        assert!(share.link.contains("/s#"), "back to the full link");
+    }
+    sender.shutdown().await.unwrap();
+}

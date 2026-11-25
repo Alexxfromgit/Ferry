@@ -11,8 +11,8 @@ Both name the same thing: the sender's **device ID** (its public key) and the sh
 (16 random bytes made for that share). Neither contains IP addresses, file names or the files'
 hash. The `ferry://s/<CODE>` and `ferry://s#<payload>` forms open an installed app directly.
 
-Ferry shows the short link once the link service has accepted it, and the full link until
-then, or when short links are turned off (Settings → Connections → Short links, or
+Ferry shows the short link and its code once the link service has accepted it, and the full
+link until then, or when short links are turned off (Settings → Connections → Short links, or
 `--no-short-links`) or relays are off. `.ferry` files always hold the full link data.
 
 ## The full link
@@ -68,8 +68,12 @@ lower-case hex, and times are unix seconds. Integers in signed messages are big-
 
 ### `GET /api/links/<CODE>`: look up
 
-Answers `{ "endpoint", "token", "relay" }`, or `404` when the code is unknown or expired.
-Lookups are limited per IP address, and over the limit the answer is `429`.
+Answers `{ "endpoint", "token", "relay", "expires", "sig" }`, or `404` when the code is
+unknown or expired. Lookups are limited per IP address, and over the limit the answer is `429`.
+
+The recipient's Ferry checks `sig` over the registration message above before it uses `relay`,
+so the service can't send recipients to a relay of its choosing; without a valid signature the
+relay is ignored and the device is found through address lookup.
 
 ### `DELETE /api/links/<CODE>`: remove
 
@@ -85,12 +89,16 @@ Lookups are limited per IP address, and over the limit the answer is `429`.
 
 ## What the service sees
 
-- **Stored:** the code, device ID, token, home relay and expiry time. No IP addresses, no file
-  names, no passwords.
+- **Stored:** the code, device ID, token, home relay, expiry time and the registration's
+  signature. No IP addresses, no file names, no passwords. Because it holds the token, whoever
+  runs the service could open a share that has no password, just like anyone the link was sent
+  to; a password protects a share from the service too.
 - **Seen in passing:** the IP address of each device that registers or looks up a code.
   Cloudflare, which runs the service, handles those requests like any web request.
 
-If that matters to you, turn short links off and send full links instead.
+If that matters to you, turn short links off and send full links instead. Turning them off in
+Settings also removes your existing short links from the service. A share removed while short
+links are off keeps its code until it expires (30 days at most).
 
 A code works like the link it stands for: whoever has it can ask the sender for the share.
 Locking the share with a password protects it in every form, as
