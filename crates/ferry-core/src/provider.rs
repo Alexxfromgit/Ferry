@@ -1,7 +1,7 @@
 //! Sender side: decides which requests are served and tracks upload activity per share.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -62,6 +62,31 @@ struct Served {
     sizes: Option<Arc<[u64]>>,
 }
 
+/// Devices kept per share in memory; the oldest is forgotten first, so a stream of made-up
+/// device ids can't grow this without limit.
+const MAX_GRANTS: usize = 4096;
+
+/// The devices that may fetch one share, in the order they were let in.
+#[derive(Default)]
+struct Grants {
+    devices: HashSet<EndpointId>,
+    order: VecDeque<EndpointId>,
+}
+
+impl Grants {
+    fn insert(&mut self, device: EndpointId) {
+        if !self.devices.insert(device) {
+            return;
+        }
+        self.order.push_back(device);
+        if self.order.len() > MAX_GRANTS
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.devices.remove(&oldest);
+        }
+    }
+}
+
 /// A connection: the endpoint it arrived on (Ferry may run more than one) and its id there.
 pub(crate) type ConnectionKey = (u8, u64);
 
@@ -120,7 +145,7 @@ pub(crate) struct Activity {
 pub struct ProviderState {
     shared: RwLock<HashMap<Hash, Served>>,
     /// Devices that may fetch each share, whether or not it is served right now.
-    grants: RwLock<HashMap<Hash, HashSet<EndpointId>>>,
+    grants: RwLock<HashMap<Hash, Grants>>,
     /// The device behind each open connection.
     peers: Mutex<HashMap<ConnectionKey, EndpointId>>,
     stats: Mutex<HashMap<Hash, ShareStats>>,
@@ -174,11 +199,15 @@ impl ProviderState {
     /// Replace the devices that may fetch a share. Transfers to devices no longer on the
     /// list end.
     pub fn set_grants(&self, hash: Hash, devices: impl IntoIterator<Item = EndpointId>) {
-        let devices: HashSet<EndpointId> = devices.into_iter().collect();
+        let mut new = Grants::default();
+        for device in devices {
+            new.insert(device);
+        }
         let revoked = {
             let mut grants = self.grants.write().unwrap();
-            let before = grants.insert(hash, devices.clone()).unwrap_or_default();
-            !before.is_subset(&devices)
+            let before = grants.insert(hash, new).unwrap_or_default();
+            let after = &grants[&hash].devices;
+            !before.devices.is_subset(after)
         };
         if revoked {
             self.revoke_running(&hash);
@@ -200,7 +229,7 @@ impl ProviderState {
             .read()
             .unwrap()
             .get(hash)
-            .is_some_and(|devices| devices.contains(device))
+            .is_some_and(|grants| grants.devices.contains(device))
     }
 
     /// End the running transfers of a share; it stays served, in a new generation, so
@@ -244,13 +273,17 @@ impl ProviderState {
     /// This happens before permission is sent, so a request admitted before the share is
     /// turned off is ended even if the share is turned on again before it is tracked. The
     /// subscription is made first, so a share turned off right after this is noticed too.
+    ///
+    /// The generation is read before the grant is checked: grants are removed before the
+    /// generation changes, so a device whose grant is removed meanwhile is either refused here
+    /// or admitted in the old generation, whose transfers then end.
     fn admit(&self, hash: &Hash, connection: ConnectionKey) -> Option<Admission> {
         let revoked = self.revoked.subscribe();
         let device = *self.peers.lock().unwrap().get(&connection)?;
+        let generation = self.generation(hash)?;
         if !self.is_granted(hash, &device) {
             return None;
         }
-        let generation = self.generation(hash)?;
         Some(Admission {
             generation,
             revoked,
@@ -849,8 +882,27 @@ mod tests {
 
         state.grant(hash, alice);
         state.disallow(&hash);
+        assert!(state.grants.read().unwrap().get(&hash).is_none());
         state.allow(hash, 1000, None);
         assert!(state.admit(&hash, (0, 1)).is_none(), "removal drops grants");
+    }
+
+    #[test]
+    fn grants_are_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = ProviderState::new(FileLists::new(dir.path().to_path_buf()));
+        let hash = Hash::new(b"share");
+        let first = iroh::SecretKey::generate().public();
+        state.grant(hash, first);
+        for _ in 0..MAX_GRANTS {
+            state.grant(hash, iroh::SecretKey::generate().public());
+        }
+        let grants = state.grants.read().unwrap();
+        assert_eq!(grants[&hash].devices.len(), MAX_GRANTS);
+        assert!(
+            !grants[&hash].devices.contains(&first),
+            "the oldest goes first"
+        );
     }
 
     #[test]

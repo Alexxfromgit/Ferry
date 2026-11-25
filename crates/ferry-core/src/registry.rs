@@ -4,7 +4,7 @@
 //! own file (`shares/<id>.json`), so this registry stays small however many files are shared.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -107,6 +107,8 @@ pub struct DownloadInfo {
     /// Hex BLAKE3 hash of the collection root; also the download id.
     pub id: String,
     /// The sender's full link (device and share token), used to reconnect when resuming.
+    /// Empty for downloads started by Ferry 0.3 and earlier, which can't be resumed.
+    #[serde(default)]
     pub link: String,
     pub dest_dir: PathBuf,
     pub name: String,
@@ -153,12 +155,15 @@ pub struct ShareAccess {
     /// Argon2id hash (PHC string) of the share's password, if it is locked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
-    /// Devices (endpoint ids, hex) that presented the token, and the password if one was set.
-    /// They may fetch the share until it is removed or its password changes, so downloads
-    /// resume without asking again.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub grants: BTreeSet<String>,
+    /// Devices (endpoint ids, hex) that gave the password of a locked share, oldest first, at
+    /// most [`MAX_SAVED_GRANTS`]. They may fetch the share until it is removed or its password
+    /// changes, so their downloads resume without asking again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grants: Vec<String>,
 }
+
+/// Devices remembered per locked share; the oldest is forgotten first.
+pub const MAX_SAVED_GRANTS: usize = 256;
 
 impl ShareAccess {
     /// Access for a new share: a fresh token, no password, nobody granted yet.
@@ -166,8 +171,20 @@ impl ShareAccess {
         Self {
             token: ShareToken::generate(),
             password: None,
-            grants: BTreeSet::new(),
+            grants: Vec::new(),
         }
+    }
+
+    /// Remember a device; returns whether that changed anything.
+    pub fn grant(&mut self, device: String) -> bool {
+        if self.grants.contains(&device) {
+            return false;
+        }
+        if self.grants.len() >= MAX_SAVED_GRANTS {
+            self.grants.remove(0);
+        }
+        self.grants.push(device);
+        true
     }
 }
 
@@ -351,6 +368,40 @@ mod tests {
         // Saved again without the list.
         let json = String::from_utf8(registry.to_json().unwrap()).unwrap();
         assert!(!json.contains("A/x"));
+    }
+
+    #[test]
+    fn registries_from_ferry_0_3_still_load() {
+        // A 0.3.0 registry: downloads have a `ticket` instead of a `link`, and there is no
+        // `access` section.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        let old = r#"{"shares": [{"id": "abc", "name": "A", "sourcePaths": [], "fileCount": 1,
+            "totalSize": 3, "createdAt": 1}],
+            "downloads": [{"id": "def", "ticket": "blobabc", "destDir": "/tmp", "name": "B",
+            "status": "paused", "doneBytes": 1, "totalBytes": 2, "createdAt": 1}]}"#;
+        std::fs::write(&path, old).unwrap();
+        let (registry, _) = Registry::load(&path).unwrap();
+        assert!(path.exists(), "nothing was set aside");
+        assert_eq!(registry.shares.len(), 1);
+        assert_eq!(registry.downloads.len(), 1);
+        assert!(registry.downloads[0].link.is_empty());
+        assert!(registry.access.is_empty());
+    }
+
+    #[test]
+    fn saved_grants_are_bounded() {
+        let mut access = ShareAccess::generate();
+        assert!(access.grant("first".into()));
+        assert!(!access.grant("first".into()));
+        for i in 0..MAX_SAVED_GRANTS {
+            access.grant(i.to_string());
+        }
+        assert_eq!(access.grants.len(), MAX_SAVED_GRANTS);
+        assert!(
+            !access.grants.contains(&"first".to_string()),
+            "the oldest goes first"
+        );
     }
 
     #[test]

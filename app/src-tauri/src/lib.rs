@@ -22,7 +22,7 @@ use std::{
 
 use ferry_core::{
     AccessError, Config, DownloadInfo, DownloadStatus, Event, Node, NodeStatus, Preview,
-    RelayChoice, SHARE_FILE_EXTENSION, ShareInfo, ShareLink, TicketFile, TicketPassword,
+    RelayChoice, SHARE_FILE_EXTENSION, ShareInfo, ShareLink,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent, path::BaseDirectory};
@@ -77,13 +77,6 @@ struct AppState {
 enum IncomingShare {
     Link { link: String },
     File { path: PathBuf },
-}
-
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-enum OpenedTicket {
-    Ready { link: String },
-    PasswordRequired,
 }
 
 /// A preview, or why the sender wants a (different) password first.
@@ -184,15 +177,9 @@ async fn remove_share(
     Ok(())
 }
 
-/// Write a `.ferry` file. The extension is always `.ferry`, whatever the path says. A locked
-/// share's file needs (and is encrypted with) the share's password.
+/// Write a `.ferry` file. The extension is always `.ferry`, whatever the path says.
 #[tauri::command]
-async fn save_share_file(
-    state: State<'_, AppState>,
-    id: String,
-    path: PathBuf,
-    password: Option<String>,
-) -> CmdResult<()> {
+async fn save_share_file(state: State<'_, AppState>, id: String, path: PathBuf) -> CmdResult<()> {
     let node = state.node.clone();
     let path = if has_ticket_extension(&path) {
         path
@@ -201,10 +188,7 @@ async fn save_share_file(
         name.push(format!(".{SHARE_FILE_EXTENSION}"));
         PathBuf::from(name)
     };
-    let password = password.map(|value| TicketPassword::from(value.into_boxed_str()));
-    node.save_share_file(&id, &path, password)
-        .await
-        .map_err(fail)
+    node.save_share_file(&id, &path).await.map_err(fail)
 }
 
 /// Protect a share with a password, change it, or remove it (`None`).
@@ -235,16 +219,11 @@ fn share_qr(state: State<'_, AppState>, id: String) -> CmdResult<String> {
         .build())
 }
 
-/// Read a `.ferry` file opened from the desktop, picker, or drop handler. On phones the picker
-/// hands out `content://` URIs instead of paths.
+/// Read a `.ferry` file opened from the desktop, picker, or drop handler, and return its link.
+/// On phones the picker hands out `content://` URIs instead of paths.
 #[tauri::command]
 #[cfg_attr(desktop, allow(unused_variables))]
-async fn read_share_file(
-    app: AppHandle,
-    path: PathBuf,
-    password: Option<String>,
-) -> CmdResult<OpenedTicket> {
-    let password = password.map(|value| TicketPassword::from(value.into_boxed_str()));
+async fn read_share_file(app: AppHandle, path: PathBuf) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
         #[cfg(mobile)]
         if let Some(url) = path
@@ -254,36 +233,20 @@ async fn read_share_file(
         {
             use tauri_plugin_fs::{FsExt, OpenOptions};
             let file = app.fs().open(url, OpenOptions::new()).map_err(fail)?;
-            return opened_ticket(TicketFile::read_from(file).map_err(fail)?, password);
+            let link = ferry_core::read_ticket_from(file).map_err(fail)?;
+            return Ok(link.to_url());
         }
-        read_share_file_checked(&path, password)
+        read_share_file_checked(&path)
     })
     .await
     .map_err(fail)?
 }
 
-fn read_share_file_checked(
-    path: &Path,
-    password: Option<TicketPassword>,
-) -> CmdResult<OpenedTicket> {
+fn read_share_file_checked(path: &Path) -> CmdResult<String> {
     if !has_ticket_extension(path) {
         return Err("That is not a Ferry ticket file (.ferry).".into());
     }
-    opened_ticket(TicketFile::read(path).map_err(fail)?, password)
-}
-
-fn opened_ticket(ticket: TicketFile, password: Option<TicketPassword>) -> CmdResult<OpenedTicket> {
-    let link = match (ticket, password) {
-        (TicketFile::Ready(link), None) => link,
-        (TicketFile::Protected(_), None) => return Ok(OpenedTicket::PasswordRequired),
-        (TicketFile::Protected(ticket), Some(password)) => ticket.unlock(password).map_err(fail)?,
-        (TicketFile::Ready(_), Some(_)) => {
-            return Err("The ticket file changed. Open it again.".into());
-        }
-    };
-    Ok(OpenedTicket::Ready {
-        link: link.to_url(),
-    })
+    Ok(ferry_core::read_ticket_file(path).map_err(fail)?.to_url())
 }
 
 /// What a link holds. A locked share answers with what the password prompt should say.
@@ -1063,7 +1026,7 @@ mod tests {
         let other = dir.join("x.txt");
         std::fs::write(&other, "secret").unwrap();
         assert!(link_from_arg(other.to_str().unwrap()).is_none());
-        assert!(read_share_file_checked(&other, None).is_err());
+        assert!(read_share_file_checked(&other).is_err());
     }
 
     #[test]

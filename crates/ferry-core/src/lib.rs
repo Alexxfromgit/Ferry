@@ -18,7 +18,7 @@ mod speed;
 mod ticket_file;
 mod util;
 
-pub use access::MIN_PASSWORD_CHARS;
+pub use access::{MIN_PASSWORD_CHARS, check_password};
 pub use config::{Config, RelayChoice, validate_relay_url};
 pub use events::{ConnectionKind, Event, ReceiverProgress};
 pub use link::{
@@ -27,5 +27,5 @@ pub use link::{
 };
 pub use node::{AccessError, Node, NodeStatus, PREVIEW_FILES, Preview};
 pub use registry::{DownloadInfo, DownloadStatus, ShareInfo, SkipReason, SkippedItem};
-pub use ticket_file::{ProtectedTicket, TicketFile, TicketPassword};
+pub use ticket_file::{read_ticket_file, read_ticket_from};
 pub use util::write_atomic;

@@ -50,8 +50,7 @@ use crate::{
         ShareAccess, ShareInfo, SkipReason, SkippedItem,
     },
     speed::SpeedMeter,
-    ticket_file::{self, TicketPassword},
-    util,
+    ticket_file, util,
 };
 
 /// Largest collection index (list of file hashes) we accept from a peer.
@@ -767,15 +766,10 @@ impl Node {
         self.inner.file_lists.read(&share.id)
     }
 
-    /// Save a `.ferry` file of a share. A locked share's file is encrypted with its password,
-    /// which must be given and is checked first; other shares' files take no password.
-    pub async fn save_share_file(
-        &self,
-        id: &str,
-        path: &Path,
-        password: Option<TicketPassword>,
-    ) -> anyhow::Result<()> {
-        use age::secrecy::ExposeSecret;
+    /// Save a `.ferry` file of a share. It holds only the link data; a locked share's file is
+    /// no different, since its token gets nobody in without the password, and encrypting it
+    /// with that password would let whoever holds the file guess the password offline.
+    pub async fn save_share_file(&self, id: &str, path: &Path) -> anyhow::Result<()> {
         let (_, id) = parse_id(id).context("invalid share id")?;
         let access = self
             .inner
@@ -788,25 +782,7 @@ impl Node {
             .context("unknown share")?;
         let link = self.link_for(access.token);
         let path = path.to_path_buf();
-        match (access.password, password) {
-            (Some(hash), Some(password)) => {
-                tokio::task::spawn_blocking(move || {
-                    anyhow::ensure!(
-                        access::verify_password(&hash, password.expose_secret())?,
-                        "That is not this share's password"
-                    );
-                    ticket_file::save_ticket_file(&path, &link, Some(password))
-                })
-                .await?
-            }
-            (Some(_), None) => {
-                anyhow::bail!("Enter the share's password to save its ticket file")
-            }
-            (None, Some(_)) => anyhow::bail!(
-                "Protect the share with a password first; its ticket file then uses the same one"
-            ),
-            (None, None) => ticket_file::save_ticket_file(&path, &link, None),
-        }
+        tokio::task::spawn_blocking(move || ticket_file::save_ticket_file(&path, &link)).await?
     }
 
     /// Protect a share with a password, change it, or remove it (`None`). Devices that
@@ -881,7 +857,7 @@ impl Node {
             let Some(password) = request.password else {
                 return OpenResponse::PasswordRequired;
             };
-            if let Err(wait) = self.inner.guesses.take(&id) {
+            if let Err(wait) = self.inner.guesses.take(&id, remote) {
                 return OpenResponse::WrongPassword {
                     retry_after_secs: wait.as_secs().max(1),
                 };
@@ -890,7 +866,7 @@ impl Node {
                 tokio::task::spawn_blocking(move || access::verify_password(&stored, &password))
                     .await;
             match verified {
-                Ok(Ok(true)) => {}
+                Ok(Ok(true)) => self.inner.guesses.give_back(&id, remote),
                 Ok(Ok(false)) => {
                     return OpenResponse::WrongPassword {
                         retry_after_secs: 0,
@@ -906,7 +882,6 @@ impl Node {
                 }
             }
         }
-        let devices = std::iter::once(remote).chain(request.also_for);
         let changed = {
             let mut registry = self.inner.registry.lock().unwrap();
             // The share may have been removed, or got a new password, while this was checked.
@@ -916,15 +891,16 @@ impl Node {
             if access.token != request.token || access.password != password_hash {
                 return OpenResponse::Unavailable;
             }
-            let mut changed = false;
-            for device in devices {
-                changed |= access.grants.insert(device_hex(&device));
-                self.inner.provider.grant(hash, device);
-            }
-            changed
+            self.inner.provider.grant(hash, remote);
+            // Only a locked share's grants are saved, so a device let in with the password can
+            // resume after a restart without it. Anyone with an open share's link is simply
+            // let in again.
+            access.password.is_some() && access.grant(device_hex(&remote))
         };
         if changed {
-            self.persist();
+            // Saving writes and syncs a file; keep it off the async threads.
+            let node = self.clone();
+            tokio::task::spawn_blocking(move || node.persist());
         }
         OpenResponse::Ok { hash }
     }
@@ -1075,7 +1051,6 @@ impl Node {
             OpenRequest {
                 token: *token,
                 password,
-                also_for: None,
             },
         )
         .await;
@@ -1388,6 +1363,10 @@ impl Node {
                 d.status = DownloadStatus::Connecting
             });
             // This device was let in when the download started, so no password is needed.
+            anyhow::ensure!(
+                !info.link.is_empty(),
+                "this download was started by an older version of Ferry; open the link again"
+            );
             let link = ShareLink::parse(&info.link)?;
             let (served, addr) = self.open_share(&link, None).await.map_err(|e| {
                 if e.downcast_ref::<AccessError>().is_some() {

@@ -63,18 +63,16 @@
     }
   }
 
-  /** Unlock a protected ticket file, or open a share whose sender asks for a password. */
+  /** Open a share whose sender asks for a password. */
   function unlock(event: SubmitEvent & { currentTarget: HTMLFormElement }) {
     event.preventDefault();
-    if (receive.openingTicket || receive.checking) return;
+    if (receive.checking || !receive.lockedLink) return;
     const password = new FormData(event.currentTarget).get("password");
     event.currentTarget.reset();
-    if (typeof password !== "string" || !password) return;
-    if (receive.protectedTicket) void openTicket(receive.protectedTicket, password);
-    else if (receive.lockedLink) void checkLink(receive.lockedLink, password);
+    if (typeof password === "string" && password) void checkLink(receive.lockedLink, password);
   }
 
-  // The password field takes focus when it appears. A protected ticket opened at launch
+  // The password field takes focus when it appears. A locked share opened at launch
   // mounts it behind the startup splash, where the UI is inert and focus can't land, so it
   // waits for the splash to go.
   let passwordInput = $state<HTMLInputElement | null>(null);
@@ -129,19 +127,13 @@
     </button>
   </form>
 
-  {#if receive.protectedTicket || receive.lockedLink}
-    {#key receive.protectedTicket ?? receive.lockedLink}
+  {#if receive.lockedLink}
+    {#key receive.lockedLink}
       <form class="unlock glass" onsubmit={unlock}>
-        <label for="ticket-password">
-          {receive.protectedTicket
-            ? `Password for ${receive.protectedTicket.split(/[\\/]/).at(-1)}`
-            : "This share is protected. Enter the password the sender gave you."}
-        </label>
+        <label for="share-password">This share is protected. Enter the password the sender gave you.</label>
         <div class="paste">
-          <input id="ticket-password" name="password" type="password" autocomplete="off" bind:this={passwordInput} required />
-          <button class="primary" type="submit" disabled={receive.openingTicket || receive.checking}>
-            {receive.protectedTicket ? "Unlock ticket" : "Open share"}
-          </button>
+          <input id="share-password" name="password" type="password" autocomplete="off" bind:this={passwordInput} required />
+          <button class="primary" type="submit" disabled={receive.checking}>Open share</button>
           <button class="quiet" type="button" onclick={clearPreview}>Cancel</button>
         </div>
       </form>
@@ -151,7 +143,7 @@
   {#if receive.checking}
     <p class="muted status" aria-live="polite">Contacting the sender…</p>
   {:else if receive.openingTicket}
-    <p class="muted status" aria-live="polite">{receive.protectedTicket ? "Unlocking ticket…" : "Opening ticket…"}</p>
+    <p class="muted status" aria-live="polite">Opening ticket…</p>
   {:else if receive.problem}
     <div class="problem glass" role="alert">
       <p><strong>{receive.problem.title}</strong></p>

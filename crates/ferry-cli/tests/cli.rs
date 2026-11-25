@@ -165,12 +165,37 @@ fn locked_shares_ask_for_the_password() {
     assert!(text(&output).contains("not right"), "{}", text(&output));
     assert!(!dest.join("plans.txt").exists());
 
-    // The encrypted ticket file opens with the same password, which also unlocks the share.
+    // The ticket file opens like the link; the sender asks for the password.
     let output = get(ticket.as_os_str(), Some("winter crossing"));
     assert!(output.status.success(), "{}", text(&output));
     assert_eq!(
         std::fs::read(dest.join("plans.txt")).unwrap(),
         b"top secret plans"
+    );
+}
+
+#[test]
+fn a_rejected_password_shares_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("plans.txt");
+    std::fs::write(&file, b"top secret plans").unwrap();
+    let data = tmp.path().join("a");
+    let output = ferry(&data)
+        .arg("share")
+        .arg(&file)
+        .arg("--password")
+        .env("FERRY_SHARE_PASSWORD", "abc")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{}", text(&output));
+    assert!(text(&output).contains("at least"), "{}", text(&output));
+    let output = ferry(&data).arg("shares").output().unwrap();
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(
+        !text(&output).contains("plans.txt"),
+        "no open share is left behind: {}",
+        text(&output)
     );
 }
 

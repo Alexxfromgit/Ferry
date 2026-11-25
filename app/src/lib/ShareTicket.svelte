@@ -12,8 +12,6 @@
   let qr = $state<string | null>(null);
   let qrDialog = $state<HTMLDialogElement | null>(null);
   let passwordDialog = $state<HTMLDialogElement | null>(null);
-  /** "lock" sets or changes the share's password; "save" asks for it to save the ticket file. */
-  let passwordMode = $state<"lock" | "save">("lock");
   let passwordProblem = $state("");
   let saving = $state(false);
 
@@ -93,37 +91,26 @@
 
   const spokes = [0, 45, 90, 135, 180, 225, 270, 315];
 
-  /** The shortest password a share accepts (matches the engine). */
+  /** The shortest password a share accepts, not counting spaces at either end (as the engine
+   * counts it). */
   const MIN_PASSWORD = 4;
 
-  async function saveFile(password?: string) {
+  async function saveFile() {
     const id = share.id;
     saving = true;
     try {
       const path = await save({
-        // A locked share's file name doesn't give away what it holds.
-        defaultPath: password === undefined ? `${share.name}.ferry` : "protected-ticket.ferry",
+        defaultPath: `${share.name}.ferry`,
         filters: [{ name: "Ferry ticket", extensions: ["ferry"] }],
       });
       if (!path) return;
-      await api.saveShareFile(id, path, password);
-      toast(password === undefined ? "Ticket file saved" : "Password-protected ticket saved");
+      await api.saveShareFile(id, path);
+      toast("Ticket file saved");
     } catch (err) {
       toast(`Couldn't save the ticket file: ${message(err)}`, true);
     } finally {
       saving = false;
     }
-  }
-
-  function askPassword(mode: "lock" | "save") {
-    passwordMode = mode;
-    passwordDialog?.showModal();
-  }
-
-  /** A locked share's ticket file is encrypted with its password, so that is asked first. */
-  function saveTicket() {
-    if (share.locked) askPassword("save");
-    else void saveFile();
   }
 
   async function setPassword(password: string | null) {
@@ -149,11 +136,7 @@
     const password = values.get("password");
     if (typeof password !== "string" || !password.trim()) {
       passwordProblem = "Enter a password.";
-    } else if (passwordMode === "save") {
-      event.currentTarget.reset();
-      passwordDialog?.close();
-      void saveFile(password);
-    } else if ([...password].length < MIN_PASSWORD) {
+    } else if ([...password.trim()].length < MIN_PASSWORD) {
       passwordProblem = `Use at least ${MIN_PASSWORD} characters.`;
     } else if (password !== values.get("confirmation")) {
       passwordProblem = "Passwords do not match.";
@@ -300,9 +283,9 @@
             <button class="t-line" onclick={() => copyLink(share)}>Copy link</button>
           {:else}
             <button class="t-main" onclick={() => copyLink(share)}>Copy link</button>
-            <button class="t-line" onclick={saveTicket} disabled={saving}>Save ticket file</button>
+            <button class="t-line" onclick={() => void saveFile()} disabled={saving}>Save ticket file</button>
           {/if}
-          <button class="t-line" onclick={() => askPassword("lock")} disabled={saving}>
+          <button class="t-line" onclick={() => passwordDialog?.showModal()} disabled={saving}>
             {share.locked ? "Change password" : "Require a password"}
           </button>
           <span class="end">
@@ -344,24 +327,14 @@
 <dialog
   bind:this={passwordDialog}
   class="protect-dialog"
-  aria-label={passwordMode === "save" ? "Save the ticket file" : "Password for this share"}
+  aria-label="Password for this share"
   onclose={() => {
     passwordDialog?.querySelector("form")?.reset();
     passwordProblem = "";
   }}
 >
   <form onsubmit={submitPassword}>
-    {#if passwordMode === "save"}
-      <h2>Save the ticket file</h2>
-      <p class="muted">
-        The file is encrypted with this share's password, so it shows nothing without it.
-      </p>
-      <label>
-        The share's password
-        <input name="password" type="password" autocomplete="current-password" required />
-      </label>
-    {:else}
-      <h2>{share.locked ? "Change the password" : "Require a password"}</h2>
+    <h2>{share.locked ? "Change the password" : "Require a password"}</h2>
       <p class="muted">
         Whoever opens the link, QR code or ticket file has to enter it first, and your Ferry
         checks it. Send the password separately, for example by phone.
@@ -375,17 +348,16 @@
         Confirm password
         <input name="confirmation" type="password" autocomplete="new-password" required />
       </label>
-    {/if}
     {#if passwordProblem}<p role="alert">{passwordProblem}</p>{/if}
     <div class="protect-actions">
-      {#if passwordMode === "lock" && share.locked}
+      {#if share.locked}
         <button class="quiet" type="button" onclick={() => setPassword(null)} disabled={saving}>
           Remove password
         </button>
       {/if}
       <button class="quiet" type="button" onclick={() => passwordDialog?.close()}>Cancel</button>
       <button class="primary" type="submit" disabled={saving}>
-        {passwordMode === "save" ? "Choose where to save" : "Set password"}
+        Set password
       </button>
     </div>
   </form>

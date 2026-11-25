@@ -59,7 +59,6 @@ export const receive = $state({
   link: "",
   checking: false,
   openingTicket: false,
-  protectedTicket: null as string | null,
   /** A link whose sender asks for a password before showing anything. */
   lockedLink: null as string | null,
   preview: null as Preview | null,
@@ -239,28 +238,20 @@ async function makeShare(create: () => Promise<ShareInfo>, copying: boolean): Pr
 let checkToken = 0;
 
 /** Open a ticket from the file picker, a drop, or the operating system. */
-export async function openTicket(path: string, password?: string) {
+export async function openTicket(path: string) {
   clearPreview();
   const token = checkToken;
   app.view = "receive";
   receive.link = "";
   receive.openingTicket = true;
-  if (password !== undefined) receive.protectedTicket = path;
   try {
-    const ticket = await api.readShareFile(path, password);
+    const link = await api.readShareFile(path);
     if (token !== checkToken) return;
-    if (ticket.kind === "passwordRequired") {
-      receive.protectedTicket = path;
-    } else {
-      // A locked share's ticket file is encrypted with the share's own password.
-      await checkLink(ticket.link, password);
-    }
+    // The sender asks for the password, if the share has one.
+    await checkLink(link);
   } catch (err) {
     if (token !== checkToken) return;
-    receive.problem = {
-      title: password === undefined ? "Couldn't open the ticket file." : "Couldn't unlock the ticket file.",
-      detail: message(err),
-    };
+    receive.problem = { title: "Couldn't open the ticket file.", detail: message(err) };
   } finally {
     if (token === checkToken) receive.openingTicket = false;
   }
@@ -272,7 +263,6 @@ export async function checkLink(text: string, password?: string) {
   if (!text.trim()) return;
   const token = ++checkToken;
   receive.openingTicket = false;
-  receive.protectedTicket = null;
   // Keep the password form up while a typed password is checked.
   if (password === undefined || receive.lockedLink !== text) receive.lockedLink = null;
   receive.checking = true;
@@ -328,7 +318,6 @@ export function clearPreview() {
   receive.previewPassword = undefined;
   receive.checking = false;
   receive.openingTicket = false;
-  receive.protectedTicket = null;
   receive.lockedLink = null;
   receive.problem = null;
   receive.dest = null;

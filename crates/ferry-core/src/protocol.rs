@@ -35,16 +35,12 @@ pub enum Request {
 pub struct OpenRequest {
     pub token: ShareToken,
     pub password: Option<String>,
-    /// Another device of the recipient's that will fetch the share too (used when its
-    /// downloads go through a separate endpoint on the local network).
-    pub also_for: Option<EndpointId>,
 }
 
 impl std::fmt::Debug for OpenRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpenRequest")
             .field("password", &self.password.as_ref().map(|_| ".."))
-            .field("also_for", &self.also_for)
             .finish_non_exhaustive()
     }
 }

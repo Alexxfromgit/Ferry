@@ -10,7 +10,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use ferry_core::{
     AccessError, Config, ConnectionKind, DownloadStatus, Event, Node, Preview, RelayChoice,
-    SHARE_FILE_EXTENSION, ShareLink, SkipReason, TicketFile, TicketPassword, format_code,
+    SHARE_FILE_EXTENSION, ShareLink, SkipReason, check_password, format_code, read_ticket_file,
 };
 
 /// Scripts can give the share password here instead of typing it.
@@ -38,8 +38,7 @@ enum Command {
     Share {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        /// Also write a .ferry share file to this path (encrypted if the share has a
-        /// password).
+        /// Also write a .ferry share file to this path.
         #[arg(long)]
         save_file: Option<PathBuf>,
         /// Ask recipients for a password. Prompts for it, or reads FERRY_SHARE_PASSWORD.
@@ -132,6 +131,10 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
             } else {
                 None
             };
+            // Checked before anything is shared, so a bad password never leaves an open share.
+            if let Some(password) = &password {
+                check_password(password)?;
+            }
             let mut events = node.subscribe();
             let progress = tokio::spawn(async move {
                 while let Ok(event) = events.recv().await {
@@ -153,9 +156,17 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
             progress.abort();
             eprintln!();
             if let Some(password) = &password {
-                share = node
+                match node
                     .set_share_password(&share.id, Some(password.clone()))
-                    .await?;
+                    .await
+                {
+                    Ok(locked) => share = locked,
+                    Err(e) => {
+                        // Never leave the share open when it was meant to be locked.
+                        node.remove_share(&share.id).await.ok();
+                        return Err(e.context("the share was not locked, so it was removed"));
+                    }
+                }
             }
             println!(
                 "sharing \"{}\": {} file(s), {}",
@@ -178,11 +189,7 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                 } else {
                     path
                 };
-                let file_password = password
-                    .clone()
-                    .map(|p| TicketPassword::from(p.into_boxed_str()));
-                node.save_share_file(&share.id, &path, file_password)
-                    .await?;
+                node.save_share_file(&share.id, &path).await?;
                 println!("share file written to {}", path.display());
             }
             println!("\nsend this link to the recipient:\n\n{}\n", share.link);
@@ -204,19 +211,7 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
             let path = Path::new(&link);
             let mut password = std::env::var(PASSWORD_ENV).ok();
             let link = if path.is_file() {
-                match TicketFile::read(path)? {
-                    TicketFile::Ready(link) => link,
-                    TicketFile::Protected(ticket) => {
-                        let typed = match password.clone() {
-                            Some(password) => password,
-                            None => prompt_password()?,
-                        };
-                        let link = ticket.unlock(TicketPassword::from(typed.clone()))?;
-                        // The share is locked with the same password.
-                        password = Some(typed);
-                        link
-                    }
-                }
+                read_ticket_file(path)?
             } else {
                 ShareLink::parse(&link)?
             };

@@ -87,10 +87,12 @@ use `https://that-name` in Ferry. Use an `iroh-relay` version matching the iroh 
   are cut off. Your original files are never deleted.
 - **A password locks the share itself.** With **Require a password**, the link, the QR code
   and the ticket file all need the password, and your Ferry checks it. It only ever stores a
-  hash of the password, takes about six guesses a minute per share, and a locked share's ticket
-  file is encrypted with the same password. Devices that opened the share keep access, so their
-  downloads can resume, until you change the password or remove the share. Use something that
-  is hard to guess and send it separately from the link.
+  hash of the password. Each device gets a few guesses and then one every ten seconds, and all
+  devices together about 30 a minute; a right password doesn't count, so someone guessing
+  doesn't lock out the real recipient for long. Ticket files hold only the link data, never
+  anything that would let a password be tested offline. Devices that gave the password keep
+  access, so their downloads can resume, until you change the password or remove the share.
+  Use something that is hard to guess and send it separately from the link.
 - **Discovery uses n0's DNS service.** It holds your device ID and home relay, not your IP
   addresses, the files or what you share. If it's unreachable, the recipient can't find you
   unless both devices use the same relay or relays are off.

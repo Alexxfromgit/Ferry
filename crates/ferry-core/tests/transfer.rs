@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use ferry_core::{
     AccessError, Config, DownloadInfo, DownloadStatus, Event, Node, RelayChoice, ShareLink,
-    ShareToken, TicketFile, TicketPassword, protocol,
+    ShareToken, protocol, read_ticket_file,
 };
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, endpoint::presets, protocol::Router};
 use iroh_blobs::{
@@ -778,7 +778,8 @@ async fn locked_shares_need_their_password() {
     let err = receiver.preview(&link, None).await.unwrap_err();
     assert_eq!(access(err), Some(AccessError::PasswordRequired));
 
-    // Guessing is slowed down: after a burst of wrong passwords even the right one waits.
+    // Guessing is slowed down: after a burst of wrong passwords this device waits, even with
+    // the right one, but another device with the right password still gets in.
     let mut limited = false;
     for _ in 0..10 {
         let err = receiver
@@ -800,10 +801,59 @@ async fn locked_shares_need_their_password() {
         access(err),
         Some(AccessError::TooManyGuesses { .. })
     ));
+    let other = node(&tmp.path().join("other")).await;
+    other
+        .preview(&link, Some("spring tide".into()))
+        .await
+        .expect("someone else's wrong guesses don't lock out the real recipient");
+    other.shutdown().await.unwrap();
 
     // Removing the password opens the share to anyone with the link again.
     sender.set_share_password(&share.id, None).await.unwrap();
     receiver.preview(&link, None).await.unwrap();
+
+    sender.shutdown().await.unwrap();
+    receiver.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_password_ends_running_downloads() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("movie.bin");
+    let data = content(128 * 1024 * 1024, 6);
+    std::fs::write(&file, &data).unwrap();
+    let sender = node(&tmp.path().join("sender")).await;
+    let receiver = node(&tmp.path().join("receiver")).await;
+    let share = sender.create_share(vec![file]).await.unwrap();
+    sender
+        .set_share_password(&share.id, Some("winter crossing".into()))
+        .await
+        .unwrap();
+    let link = ShareLink::parse(&share.link).unwrap();
+
+    let mut events = receiver.subscribe();
+    let started = receiver
+        .start_download(&link, Some("winter crossing".into()), tmp.path().join("dl"))
+        .await
+        .unwrap();
+    let partial = wait_for_partial(&mut events, &started.id).await;
+    assert!(partial < data.len() as u64, "transfer finished too quickly");
+    sender
+        .set_share_password(&share.id, Some("spring tide".into()))
+        .await
+        .unwrap();
+    let done = wait_for_end(&receiver, &started.id).await;
+    assert_eq!(
+        done.status,
+        DownloadStatus::Failed,
+        "the transfer must be cut off"
+    );
+    let error = done.error.unwrap_or_default();
+    assert!(
+        error.contains("password") || error.contains("interrupted"),
+        "{error}"
+    );
 
     sender.shutdown().await.unwrap();
     receiver.shutdown().await.unwrap();
@@ -1064,48 +1114,19 @@ async fn file_lists_live_outside_the_registry() {
 
     // .ferry files carry only the link: no names or sizes.
     let path = tmp.path().join("many.ferry");
-    node.save_share_file(&share.id, &path, None).await.unwrap();
+    node.save_share_file(&share.id, &path).await.unwrap();
     let bytes = std::fs::read(&path).unwrap();
     assert!(bytes.len() < 512, "{} bytes", bytes.len());
     assert!(!bytes.windows(5).any(|w| w == b"f0001"));
-    let TicketFile::Ready(link) = TicketFile::read(&path).unwrap() else {
-        panic!("an unlocked share's file opens without a password");
-    };
     // Codes, not whole links: without relays a link lists addresses, which can change.
-    assert_eq!(link.code(), share.code);
-    let password = || Some(TicketPassword::from("winter crossing".to_owned()));
-    assert!(
-        node.save_share_file(&share.id, &path, password())
-            .await
-            .is_err(),
-        "only locked shares have encrypted files"
-    );
+    assert_eq!(read_ticket_file(&path).unwrap().code(), share.code);
+    // A locked share's file is no different: the password is checked by the sender.
     node.set_share_password(&share.id, Some("winter crossing".into()))
         .await
         .unwrap();
-    assert!(node.save_share_file(&share.id, &path, None).await.is_err());
-    assert!(
-        node.save_share_file(
-            &share.id,
-            &path,
-            Some(TicketPassword::from("wrong".to_owned()))
-        )
-        .await
-        .is_err()
-    );
-    node.save_share_file(&share.id, &path, password())
-        .await
-        .unwrap();
-    let TicketFile::Protected(protected) = TicketFile::read(&path).unwrap() else {
-        panic!("a locked share's file is encrypted");
-    };
-    assert_eq!(
-        protected
-            .unlock(TicketPassword::from("winter crossing".to_owned()))
-            .unwrap()
-            .code(),
-        share.code
-    );
+    node.save_share_file(&share.id, &path).await.unwrap();
+    assert!(!String::from_utf8_lossy(&std::fs::read(&path).unwrap()).contains("winter"));
+    assert_eq!(read_ticket_file(&path).unwrap().code(), share.code);
 
     node.remove_share(&share.id).await.unwrap();
     assert!(!dir.join(format!("shares/{}.json", share.id)).exists());

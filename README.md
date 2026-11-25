@@ -83,8 +83,8 @@ automatically or on demand.
 4. On the sender's device, turn sharing off when you want to revoke access.
 
 **Require a password** locks the share: whoever opens its link, QR code or ticket file has to
-enter the password, and your Ferry checks it. A locked share's ticket file is encrypted with the
-same password. Use something hard to guess and send it separately from the link.
+enter the password, and your Ferry checks it, so guesses can only be made online and slowly. Use
+something hard to guess and send it separately from the link.
 
 ### Command line
 

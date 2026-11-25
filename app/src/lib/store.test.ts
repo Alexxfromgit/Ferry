@@ -266,31 +266,23 @@ describe("checking links", () => {
     expect(receive.link).toBe("ferry://s#blob");
   });
 
-  it("prompts for a protected ticket opened from the desktop and lets the user retry", async () => {
+  it("opens ticket files from the desktop and asks for a locked share's password", async () => {
     const { app, receive, openTicket } = await freshStore();
-    const path = "C:/x/protected.ferry";
+    const path = "C:/x/locked.ferry";
     backend.take_pending_links = () => [{ kind: "file", path }];
-    backend.read_share_file = ({ password }) => {
-      if (password === null) return { kind: "passwordRequired" };
-      if (password === "correct") return { kind: "ready", link: "ferry://s#blob" };
-      throw new Error("Incorrect password");
-    };
-    backend.preview = () => Promise.resolve(ready("from file"));
+    backend.read_share_file = () => "ferry://s#blob";
+    backend.preview = ({ password }: { password: string | null }) =>
+      password === "correct" ? ready("from file") : { kind: "passwordRequired" };
     handlers["ferry-open-link"]({ payload: null });
-    await vi.waitFor(() => expect(receive.protectedTicket).toBe(path));
+    await vi.waitFor(() => expect(receive.lockedLink).toBe("ferry://s#blob"));
     expect(app.view).toBe("receive");
-    expect(invoke).not.toHaveBeenCalledWith("preview", expect.anything());
-
-    await openTicket(path, "wrong");
-    expect(receive.protectedTicket).toBe(path);
-    expect(receive.problem?.detail).toMatch(/Incorrect password/);
-
-    await openTicket(path, "correct");
-    expect(receive.protectedTicket).toBeNull();
-    expect(receive.preview?.name).toBe("from file");
     expect(receive.link).toBe("");
-    // The ticket file's password goes on to the sender, which locked the share with it.
-    expect(invoke).toHaveBeenCalledWith("preview", { link: "ferry://s#blob", password: "correct" });
+
+    backend.read_share_file = () => {
+      throw new Error("Damaged Ferry ticket");
+    };
+    await openTicket(path);
+    expect(receive.problem?.detail).toMatch(/Damaged/);
   });
 
   it("asks for the password of a locked share and downloads with it", async () => {
@@ -350,7 +342,7 @@ describe("sharing", () => {
 describe("drag and drop", () => {
   it("opens dropped .ferry files and shares anything else", async () => {
     const { app, receive } = await freshStore();
-    backend.read_share_file = () => ({ kind: "ready", link: "ferry://s#blob" });
+    backend.read_share_file = () => "ferry://s#blob";
     backend.preview = () => Promise.resolve(ready("dropped"));
     await dropHandler!({ payload: { type: "drop", paths: ["C:/x/trip.ferry"] } });
     expect(app.view).toBe("receive");
