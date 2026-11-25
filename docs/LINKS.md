@@ -83,9 +83,17 @@ relay is ignored and the device is found through address lookup.
 
 - `sig` signs `"ferry-link-del-v1" || CODE || endpoint (32) || u64 timestamp`.
 - The timestamp must be within five minutes of the server's clock, and only the device that
-  registered a code can remove it.
+  registered a code can remove it. A removal older than the code's latest registration (by more
+  than five minutes) is ignored, so an old request replayed later can't remove it.
+- A removed or expired code stays reserved for a year: the service keeps only a hash of the
+  device ID for it, so no other device can take the code over during that time.
 - Ferry removes a share's code when you remove the share. A share you only turn off keeps its
   code, so the link works again when you turn it back on.
+
+A registration must carry a later `expires` than the code's last one, so an old registration
+replayed later can't roll a code back. Registrations and removals are limited to a few a minute
+per network, lookups to 60 a minute per address; Ferry paces its own requests to stay under
+that.
 
 ## What the service sees
 
@@ -93,8 +101,9 @@ relay is ignored and the device is found through address lookup.
   signature. No IP addresses, no file names, no passwords. Because it holds the token, whoever
   runs the service could open a share that has no password, just like anyone the link was sent
   to; a password protects a share from the service too.
-- **Seen in passing:** the IP address of each device that registers or looks up a code.
-  Cloudflare, which runs the service, handles those requests like any web request.
+- **Seen in passing:** the IP address of each device that registers or looks up a code, used
+  for the rate limits and not stored. The service's per-request logs are turned off, so
+  Cloudflare, which runs it, doesn't keep the addresses requested next to who requested them.
 
 If that matters to you, turn short links off and send full links instead. Turning them off in
 Settings also removes your existing short links from the service. A share removed while short
