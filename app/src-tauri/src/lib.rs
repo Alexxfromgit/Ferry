@@ -948,7 +948,7 @@ pub fn run() {
     let app = app.on_page_load(|webview, payload| {
         // Not when startup failed: its error dialog is all there is to show.
         if payload.event() == tauri::webview::PageLoadEvent::Finished && webview.label() == "main" {
-            panel::reset_holds(webview.app_handle());
+            panel::reset(webview.app_handle());
             if webview.try_state::<AppState>().is_some() {
                 show_at_startup(webview.app_handle());
             }

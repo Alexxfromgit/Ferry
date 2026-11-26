@@ -40,6 +40,46 @@ pub struct Panel {
     auto_hidden_at: Mutex<Option<Instant>>,
 }
 
+impl Panel {
+    /// Whether the panel stays when it loses focus.
+    fn stays_open(&self) -> bool {
+        self.pinned.load(Ordering::SeqCst) || self.dialog_open()
+    }
+
+    fn dialog_open(&self) -> bool {
+        *self.holds.lock().unwrap() > 0
+    }
+
+    fn hold(&self, held: bool) {
+        let mut holds = self.holds.lock().unwrap();
+        *holds = if held {
+            *holds + 1
+        } else {
+            holds.saturating_sub(1)
+        };
+    }
+
+    fn auto_hidden(&self, at: Instant) {
+        *self.auto_hidden_at.lock().unwrap() = Some(at);
+    }
+
+    /// Whether a tray click at `now` came right after losing focus hid the panel, which the
+    /// click itself caused. Each hide answers one click.
+    fn just_auto_hidden(&self, now: Instant) -> bool {
+        self.auto_hidden_at
+            .lock()
+            .unwrap()
+            .take()
+            .is_some_and(|at| now.saturating_duration_since(at) < REOPEN_GUARD)
+    }
+
+    /// A reloaded page starts unpinned, with no dialogs open, whatever the old one had.
+    fn reset(&self) {
+        self.pinned.store(false, Ordering::SeqCst);
+        *self.holds.lock().unwrap() = 0;
+    }
+}
+
 /// The panel size in use, or None when Ferry is a regular window.
 pub fn current(app: &AppHandle) -> Option<PanelSize> {
     let state = app.try_state::<AppState>()?;
@@ -116,11 +156,20 @@ pub fn place(window: &WebviewWindow, size: PanelSize, icon: Option<Rect>) {
     let (w, h) = ((w * scale).round(), (h * scale).round());
     let (x, y) = corner(&screen, &work, center, w, h, MARGIN * scale);
     let at = PhysicalPosition::new(x.round() as i32, y.round() as i32);
+    let target = PhysicalSize::new(w as u32, h as u32);
     // Moving first puts the window on the target monitor (and its scale), so the size set next
-    // is final; moving again pins the corner in case the size changed it.
-    window.set_position(at).ok();
-    window.set_size(PhysicalSize::new(w as u32, h as u32)).ok();
-    window.set_position(at).ok();
+    // is final; moving again pins the corner in case the size changed it. A window that
+    // straddled a monitor of another scale on the way is rescaled by Windows as it lands, so
+    // that one gets its size again, now on the right monitor.
+    for _ in 0..2 {
+        window.set_position(at).ok();
+        window.set_size(target).ok();
+        window.set_position(at).ok();
+        let rescaled = matches!(window.inner_size(), Ok(now) if now != target);
+        if !rescaled {
+            break;
+        }
+    }
 }
 
 /// A left click on the tray icon: closes an open panel, otherwise opens it by the icon.
@@ -128,15 +177,13 @@ pub fn toggle(app: &AppHandle, icon: Rect) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    let recently_hidden = app
-        .state::<Panel>()
-        .auto_hidden_at
-        .lock()
-        .unwrap()
-        .take()
-        .is_some_and(|at| at.elapsed() < REOPEN_GUARD);
+    let panel = app.state::<Panel>();
+    let recently_hidden = panel.just_auto_hidden(Instant::now());
     if window.is_visible().unwrap_or(false) {
-        window.hide().ok();
+        // Hiding it would leave its file picker or question on screen without it.
+        if !panel.dialog_open() {
+            window.hide().ok();
+        }
     } else if !recently_hidden {
         crate::show_main_at(app, Some(icon));
     }
@@ -148,19 +195,19 @@ pub fn on_blur(window: &Window) {
         return;
     }
     let panel = window.state::<Panel>();
-    if panel.pinned.load(Ordering::SeqCst) || *panel.holds.lock().unwrap() > 0 {
+    if panel.stays_open() {
         return;
     }
     if window.is_visible().unwrap_or(false) {
-        *panel.auto_hidden_at.lock().unwrap() = Some(Instant::now());
+        panel.auto_hidden(Instant::now());
         window.hide().ok();
     }
 }
 
-/// A reloaded page has no dialogs open, whatever it held before.
-pub fn reset_holds(app: &AppHandle) {
+/// The page (re)loaded: it starts unpinned with no dialogs open, so the panel does too.
+pub fn reset(app: &AppHandle) {
     if let Some(panel) = app.try_state::<Panel>() {
-        *panel.holds.lock().unwrap() = 0;
+        panel.reset();
     }
 }
 
@@ -172,12 +219,7 @@ pub fn set_panel_pinned(panel: State<'_, Panel>, pinned: bool) {
 /// The UI opens (`held`) or closes a native dialog, during which the panel stays.
 #[tauri::command]
 pub fn panel_hold(panel: State<'_, Panel>, held: bool) {
-    let mut holds = panel.holds.lock().unwrap();
-    *holds = if held {
-        *holds + 1
-    } else {
-        holds.saturating_sub(1)
-    };
+    panel.hold(held);
 }
 
 /// Escape in the UI: puts the panel away. A regular window stays.
@@ -332,6 +374,50 @@ mod tests {
             h: 400.0,
         };
         assert_eq!(corner(&small, &small, None, 420.0, 680.0, 12.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn stays_open_while_pinned_or_a_dialog_is_up() {
+        let panel = Panel::default();
+        assert!(!panel.stays_open());
+        panel.pinned.store(true, Ordering::SeqCst);
+        assert!(panel.stays_open());
+        panel.pinned.store(false, Ordering::SeqCst);
+        // Two dialogs at once (e.g. a question over a picker): open until both are gone.
+        panel.hold(true);
+        panel.hold(true);
+        panel.hold(false);
+        assert!(panel.stays_open() && panel.dialog_open());
+        panel.hold(false);
+        assert!(!panel.stays_open());
+        // A stray release can't leave a hold that never ends.
+        panel.hold(false);
+        panel.hold(true);
+        panel.hold(false);
+        assert!(!panel.dialog_open());
+    }
+
+    #[test]
+    fn a_reloaded_page_unpins_and_drops_holds() {
+        let panel = Panel::default();
+        panel.pinned.store(true, Ordering::SeqCst);
+        panel.hold(true);
+        panel.reset();
+        assert!(!panel.stays_open());
+    }
+
+    #[test]
+    fn a_tray_click_right_after_a_focus_loss_hide_keeps_it_closed() {
+        let panel = Panel::default();
+        let start = Instant::now();
+        assert!(!panel.just_auto_hidden(start));
+        panel.auto_hidden(start);
+        assert!(panel.just_auto_hidden(start + Duration::from_millis(150)));
+        // Only that click: the next one opens it again.
+        assert!(!panel.just_auto_hidden(start + Duration::from_millis(200)));
+        // A click long after the panel hid opens it.
+        panel.auto_hidden(start);
+        assert!(!panel.just_auto_hidden(start + REOPEN_GUARD));
     }
 
     #[test]
