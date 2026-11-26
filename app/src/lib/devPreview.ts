@@ -119,6 +119,7 @@ const settings = {
   closeToTray: true,
   showArtwork: true,
   shortLinks: true,
+  hideIp: false,
 };
 
 export function installDevPreview() {

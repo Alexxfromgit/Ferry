@@ -32,6 +32,11 @@ struct Cli {
     #[arg(long, global = true)]
     no_short_links: bool,
 
+    /// Hide this device's IP address: devices elsewhere connect only through the relay.
+    /// Devices on the same local network still connect directly. Needs relays.
+    #[arg(long, global = true)]
+    hide_ip: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -99,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
     if cli.no_short_links {
         config.links_service = None;
     }
+    config.hide_ip = cli.hide_ip;
     // A one-shot tool should not quietly continue old downloads in the background.
     config.resume_downloads = false;
     let node = Node::start(config).await?;

@@ -75,6 +75,40 @@ HTTP 80 if it fetches Let's Encrypt certificates itself, plus its UDP address-di
 use `https://that-name` in Ferry. Use an `iroh-relay` version matching the iroh version in
 `Cargo.lock`.
 
+## Hide my IP address (Settings → Connections)
+
+Turn it on and devices on other networks reach yours only through the relay: your Ferry offers
+no direct addresses and takes no part in hole punching, so they never learn your IP address,
+and with it roughly where you are. `ferry --hide-ip` does the same on the command line.
+
+Devices on your own network still connect directly, because there's nothing to hide from them:
+they already share your public address. For that, Ferry runs a second, separate endpoint that
+has no relay and never learns a public address. Once a recipient has the share's token (and
+password), your Ferry tells it that endpoint's local addresses (such as `192.168.1.20`). If the
+recipient is on the same network, it connects there directly within a couple of seconds;
+otherwise it carries on through the relay. Local addresses say nothing about where you are, and
+only devices that could open the share are told them.
+
+What still sees your address:
+
+| Who | Sees |
+| --- | --- |
+| The other device, on another network | Only the relay's address |
+| The other device, on your network | Your local address, as any device there could |
+| The relay operator (n0, or yours) | Your IP address, as it always does, but not your files |
+| Ferry's link service, for short links | Your IP address while registering, not stored |
+
+Things to know:
+
+- **Each side hides only itself.** If the other person doesn't hide theirs, you can still see
+  their address, and they can't see yours.
+- **It's slower over the internet,** since everything goes through the relay, and public relays
+  limit their speed. Your own relay helps; so does a VPN if you also want to hide your address
+  from the relay.
+- **It needs relays.** With **No relays** there would be no way to reach you, so the two can't
+  be combined.
+- Changing it takes effect after restarting Ferry.
+
 ## Limitations
 
 - **The sender must be online.** Recipients download from the sender's computer, so Ferry has to
@@ -102,7 +136,8 @@ use `https://that-name` in Ferry. Use an `iroh-relay` version matching the iroh 
   addresses to try a direct connection, so each side can learn the other's IP address, even
   when the download ends up going through a relay. Ferry doesn't show or log it, but network
   tools on that device can see it. The relay in use sees both devices' IP addresses and how
-  much data passes, though not the data itself. To hide your IP address, use a VPN.
+  much data passes, though not the data itself. **Hide my IP address**, below, keeps your
+  address from the other device.
 - **Downloads need free space twice, briefly.** Received data first goes into Ferry's own
   storage (in the local app data folder) and is then moved to the chosen folder. On the same
   drive this is a quick move; on another drive it is a copy, so the system drive needs room for

@@ -55,6 +55,10 @@ struct Settings {
     /// Make short links through Ferry's link service (and open them).
     #[serde(default = "yes")]
     short_links: bool,
+    /// Connect to devices elsewhere only through the relay, so they never learn this
+    /// device's IP address.
+    #[serde(default)]
+    hide_ip: bool,
 }
 
 fn default_auto_check_updates() -> bool {
@@ -111,6 +115,7 @@ fn load_settings(path: &Path, default_download_dir: PathBuf) -> Settings {
         auto_check_updates: default_auto_check_updates(),
         show_artwork: true,
         short_links: true,
+        hide_ip: false,
     };
     let Some(mut settings) = std::fs::read(path)
         .ok()
@@ -127,6 +132,11 @@ fn load_settings(path: &Path, default_download_dir: PathBuf) -> Settings {
 /// Settings coming from the UI must be usable, so a typo can't break the next start.
 fn validate_settings(settings: &Settings) -> Result<(), String> {
     settings.relay.validate().map_err(fail)?;
+    if settings.hide_ip && settings.relay == RelayChoice::Disabled {
+        return Err(
+            "Hiding your IP address needs relays. Choose public relays or your own first.".into(),
+        );
+    }
     if !settings.download_dir.is_absolute() {
         return Err("Choose a download folder with a full path.".into());
     }
@@ -347,7 +357,8 @@ fn set_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult
     }
     save_settings(&state.settings_path, &settings)?;
     let restart = settings.relay != *state.node.relay()
-        || settings.short_links != state.node.uses_link_service();
+        || settings.short_links != state.node.uses_link_service()
+        || settings.hide_ip != state.node.hides_ip();
     // Turning short links off also takes the existing ones off the link service, while this
     // run still talks to it.
     if saved.short_links && !settings.short_links {
@@ -797,6 +808,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     if !settings.short_links {
         config.links_service = None;
     }
+    // Settings saved by hand could ask for both; relays win, so Ferry still starts.
+    config.hide_ip = settings.hide_ip && settings.relay != RelayChoice::Disabled;
     let node = match tauri::async_runtime::block_on(Node::start(config)) {
         Ok(node) => node,
         Err(e) => {
@@ -1052,8 +1065,14 @@ mod tests {
             auto_check_updates: true,
             show_artwork: true,
             short_links: true,
+            hide_ip: true,
         };
         assert!(validate_settings(&ok).is_ok());
+        let hidden_without_relays = Settings {
+            relay: RelayChoice::Disabled,
+            ..ok.clone()
+        };
+        assert!(validate_settings(&hidden_without_relays).is_err());
         let bad_relay = Settings {
             relay: RelayChoice::Custom("https://".into()),
             ..ok.clone()
@@ -1076,6 +1095,7 @@ mod tests {
         .unwrap();
         assert!(settings.auto_check_updates);
         assert!(settings.short_links, "short links are on unless turned off");
+        assert!(!settings.hide_ip, "hiding the IP address is opt-in");
         assert!(!settings.close_to_tray);
         assert_eq!(settings.relay, RelayChoice::Disabled);
     }

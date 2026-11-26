@@ -31,3 +31,5 @@ tempfile.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+# A plain-HTTP relay for tests of relay-only connections.
+iroh-relay = { version = "1.4", features = ["server"] }

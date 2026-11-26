@@ -35,6 +35,8 @@
       ...settings,
       relay:
         relayMode === "custom" ? { mode: "custom", url: relayUrl.trim() } : { mode: relayMode },
+      // Hiding the IP address needs relays.
+      hideIp: relayMode !== "disabled" && settings.hideIp,
     };
     try {
       restartNeeded = await api.setSettings(next);
@@ -150,6 +152,24 @@
           <span>No relays <span class="muted hint">Only direct connections. Many people abroad won't reach you.</span></span>
         </label>
       </fieldset>
+      <label class="check">
+        <input
+          type="checkbox"
+          bind:checked={settings.hideIp}
+          disabled={relayMode === "disabled"}
+          onchange={persist}
+        />
+        <span>
+          Hide my IP address
+          <span class="muted hint">
+            Devices on other networks reach you only through the relay, so they never learn your
+            IP address or where you are. Devices on your own network still connect directly.
+            Transfers over the internet are slower, and the relay operator still sees your
+            address; use your own relay or a VPN if that matters. Both people need this on to
+            hide their own address. Needs relays.
+          </span>
+        </span>
+      </label>
       <label class="check">
         <input type="checkbox" bind:checked={settings.shortLinks} onchange={persist} />
         <span>

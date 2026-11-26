@@ -42,6 +42,9 @@ Every release lists its checksums in `SHA256SUMS.txt` and carries GitHub build a
   QR code, or a `.ferry` ticket file. Links name your device and the share, not your IP
   address (unless relays are turned off). [Share links](docs/LINKS.md)
 - **Passwords.** Lock a share with a password; your Ferry checks it before anyone gets in.
+- **Hide my IP address.** Devices on other networks reach you only through the relay, so they
+  never learn your IP address; devices on your own network still connect directly.
+  [How it works](docs/NETWORKING.md#hide-my-ip-address-settings--connections)
 - **Phones too.** On Android, share to Ferry from any app's Share menu, scan a QR code to receive,
   and find received files in Downloads/Ferry.
 - **Stays current.** Signed in-app updates on Windows, macOS, the Linux AppImage and Android.
