@@ -563,19 +563,16 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
+            let app = tray.app_handle();
+            if panel::current(app).is_some() {
+                panel::on_tray_event(app, &event);
+            } else if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
-                rect,
                 ..
             } = event
             {
-                let app = tray.app_handle();
-                if panel::current(app).is_some() {
-                    panel::toggle(app, rect);
-                } else {
-                    show_main(app);
-                }
+                show_main(app);
             }
         });
     if let Some(icon) = app.default_window_icon() {

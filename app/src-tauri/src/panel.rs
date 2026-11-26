@@ -16,6 +16,7 @@ use std::{
 use tauri::{
     AppHandle, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Rect, State, WebviewWindow,
     Window,
+    tray::{MouseButton, MouseButtonState, TrayIconEvent},
 };
 
 use crate::{AppState, PanelSize, Settings, panel_enabled};
@@ -26,18 +27,24 @@ const REGULAR_SIZE: (f64, f64) = (1040.0, 720.0);
 const REGULAR_MIN: (f64, f64) = (760.0, 540.0);
 const FIT_WIDTH: f64 = 440.0;
 const FIT_MAX_HEIGHT: f64 = 960.0;
-/// A panel never gets shorter than this, unless the screen itself is.
+/// A panel never gets narrower or shorter than these, unless the screen itself is.
+const MIN_WIDTH: f64 = 320.0;
 const MIN_HEIGHT: f64 = 320.0;
-/// Clicking the tray icon takes focus from the panel (hiding it) just before the click arrives.
-/// A click this soon after that hide closes the panel rather than reopening it.
-const REOPEN_GUARD: Duration = Duration::from_millis(400);
+/// A press on the tray icon takes focus from the panel, hiding it, and arrives as a tray event
+/// right after. A hide waits this long for its press to arrive; only a backstop for a press
+/// that never reports, as the toggle itself follows the press, not the time.
+const PRESS_MATCH: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub struct Panel {
     pinned: AtomicBool,
     /// Native dialogs the UI has open; the panel stays while any is up.
     holds: Mutex<usize>,
-    auto_hidden_at: Mutex<Option<Instant>>,
+    /// When losing focus hid the panel with the pointer on the tray icon: a press on the icon
+    /// took the focus, and that press's tray event is still to come.
+    hidden_by_tray_press: Mutex<Option<Instant>>,
+    /// The left press on the tray icon under way: whether it found the panel open.
+    press_found_open: Mutex<Option<bool>>,
 }
 
 impl Panel {
@@ -59,18 +66,40 @@ impl Panel {
         };
     }
 
-    fn auto_hidden(&self, at: Instant) {
-        *self.auto_hidden_at.lock().unwrap() = Some(at);
+    /// Losing focus hid the panel at `at` while the pointer was on the tray icon.
+    fn hidden_by_tray_press(&self, at: Instant) {
+        *self.hidden_by_tray_press.lock().unwrap() = Some(at);
     }
 
-    /// Whether a tray click at `now` came right after losing focus hid the panel, which the
-    /// click itself caused. Each hide answers one click.
-    fn just_auto_hidden(&self, now: Instant) -> bool {
-        self.auto_hidden_at
+    /// A left press on the tray icon began at `now`, with the panel showing or not. It found the
+    /// panel open if it was showing, or if this press is what just hid it.
+    fn left_pressed(&self, visible: bool, now: Instant) {
+        let hid_by_this_press = self
+            .hidden_by_tray_press
             .lock()
             .unwrap()
             .take()
-            .is_some_and(|at| now.saturating_duration_since(at) < REOPEN_GUARD)
+            .is_some_and(|at| now.saturating_duration_since(at) < PRESS_MATCH);
+        *self.press_found_open.lock().unwrap() = Some(visible || hid_by_this_press);
+    }
+
+    /// The left button came up: whether its press found the panel open, so the click closes
+    /// it rather than opening it, however long the button was held. A release without a press
+    /// (none reported) goes by whether the panel shows.
+    fn left_released(&self, visible: bool) -> bool {
+        // A hide by this press, if it came after the press's own event, is answered too.
+        self.hidden_by_tray_press.lock().unwrap().take();
+        self.press_found_open
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or(visible)
+    }
+
+    /// Another button on the tray icon (e.g. for its menu): that press, not a left click, is
+    /// what hid the panel.
+    fn other_button(&self) {
+        self.hidden_by_tray_press.lock().unwrap().take();
     }
 
     /// A reloaded page starts unpinned, with no dialogs open, whatever the old one had.
@@ -152,9 +181,7 @@ pub fn place(window: &WebviewWindow, size: PanelSize, icon: Option<Rect>) {
         w: monitor.size().width as f64,
         h: monitor.size().height as f64,
     };
-    let (w, h) = logical_size(size, work.h / scale);
-    let (w, h) = ((w * scale).round(), (h * scale).round());
-    let (x, y) = corner(&screen, &work, center, w, h, MARGIN * scale);
+    let (x, y, w, h) = bounds(&screen, &work, center, size, scale);
     let at = PhysicalPosition::new(x.round() as i32, y.round() as i32);
     let target = PhysicalSize::new(w as u32, h as u32);
     // Moving first puts the window on the target monitor (and its scale), so the size set next
@@ -172,21 +199,65 @@ pub fn place(window: &WebviewWindow, size: PanelSize, icon: Option<Rect>) {
     }
 }
 
-/// A left click on the tray icon: closes an open panel, otherwise opens it by the icon.
-pub fn toggle(app: &AppHandle, icon: Rect) {
+/// Mouse events on the tray icon. A left click closes the panel if its press found it open
+/// (pressing the icon may already have hidden it, by taking its focus), and otherwise opens it
+/// by the icon.
+pub fn on_tray_event(app: &AppHandle, event: &TrayIconEvent) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
     let panel = app.state::<Panel>();
-    let recently_hidden = panel.just_auto_hidden(Instant::now());
-    if window.is_visible().unwrap_or(false) {
-        // Hiding it would leave its file picker or question on screen without it.
-        if !panel.dialog_open() {
-            window.hide().ok();
+    let visible = window.is_visible().unwrap_or(false);
+    match *event {
+        // Windows reports a quick second press as a double click instead of a press.
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Down,
+            ..
         }
-    } else if !recently_hidden {
-        crate::show_main_at(app, Some(icon));
+        | TrayIconEvent::DoubleClick {
+            button: MouseButton::Left,
+            ..
+        } => panel.left_pressed(visible, Instant::now()),
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            rect,
+            ..
+        } => {
+            if !panel.left_released(visible) {
+                crate::show_main_at(app, Some(rect));
+            } else if visible && !panel.dialog_open() {
+                // With a dialog open it stays: hiding it would leave the dialog on its own.
+                window.hide().ok();
+            }
+        }
+        TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. } => panel.other_button(),
+        _ => {}
     }
+}
+
+/// Whether the pointer is on the tray icon, i.e. a press there is what took the focus.
+fn pointer_on_tray_icon(window: &Window) -> bool {
+    let Some(rect) = window
+        .app_handle()
+        .tray_by_id("main")
+        .and_then(|tray| tray.rect().ok().flatten())
+    else {
+        return false;
+    };
+    let Ok(pointer) = window.cursor_position() else {
+        return false;
+    };
+    let pos = rect.position.to_physical::<f64>(1.0);
+    let size = rect.size.to_physical::<f64>(1.0);
+    let icon = Area {
+        x: pos.x,
+        y: pos.y,
+        w: size.width,
+        h: size.height,
+    };
+    icon.contains(pointer.x, pointer.y)
 }
 
 /// The panel lost focus: it hides, unless it's pinned or a dialog of its own took the focus.
@@ -199,7 +270,9 @@ pub fn on_blur(window: &Window) {
         return;
     }
     if window.is_visible().unwrap_or(false) {
-        panel.auto_hidden(Instant::now());
+        if pointer_on_tray_icon(window) {
+            panel.hidden_by_tray_press(Instant::now());
+        }
         window.hide().ok();
     }
 }
@@ -238,15 +311,43 @@ struct Area {
     h: f64,
 }
 
-/// The panel's size in logical pixels, for a work area `work_height` logical pixels tall.
-fn logical_size(size: PanelSize, work_height: f64) -> (f64, f64) {
-    let room = (work_height - 2.0 * MARGIN).max(MIN_HEIGHT.min(work_height));
+impl Area {
+    /// Whether the point is inside, edges included (a pointer on the icon's last pixel is on it).
+    fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x && x <= self.x + self.w && y >= self.y && y <= self.y + self.h
+    }
+}
+
+/// The panel's size in logical pixels, for a work area `work_width` × `work_height` logical
+/// pixels. It never runs past the work area: the panel can't be moved or resized, so whatever
+/// fell off the screen would be out of reach.
+fn logical_size(size: PanelSize, work_width: f64, work_height: f64) -> (f64, f64) {
+    let room = |work: f64, min: f64| (work - 2.0 * MARGIN).max(min.min(work));
     let (w, h) = match size {
         PanelSize::Compact => (420.0, 680.0),
         PanelSize::Roomy => (480.0, 720.0),
         PanelSize::Fit => (FIT_WIDTH, FIT_MAX_HEIGHT),
     };
-    (w, h.min(room))
+    (
+        w.min(room(work_width, MIN_WIDTH)),
+        h.min(room(work_height, MIN_HEIGHT)),
+    )
+}
+
+/// The panel's bounds (x, y, width, height) in physical pixels, on a monitor with this scale
+/// factor, its work area `work` within `screen`, and the tray icon at `icon`.
+fn bounds(
+    screen: &Area,
+    work: &Area,
+    icon: Option<(f64, f64)>,
+    size: PanelSize,
+    scale: f64,
+) -> (f64, f64, f64, f64) {
+    let (w, h) = logical_size(size, work.w / scale, work.h / scale);
+    // Rounded down, so scaling up can't add a pixel past the work area.
+    let (w, h) = ((w * scale).floor(), (h * scale).floor());
+    let (x, y) = corner(screen, work, icon, w, h, MARGIN * scale);
+    (x, y, w, h)
 }
 
 /// Where the panel's top-left corner goes: in the corner of the work area on the taskbar's
@@ -406,28 +507,183 @@ mod tests {
         assert!(!panel.stays_open());
     }
 
-    #[test]
-    fn a_tray_click_right_after_a_focus_loss_hide_keeps_it_closed() {
-        let panel = Panel::default();
+    /// A left click on the tray icon: what it does to a panel that is `visible` when the button
+    /// goes down, where the press itself hides it (by taking its focus) if `press_hides`.
+    /// Returns whether the click closes the panel. When the button comes up plays no part.
+    fn click(panel: &Panel, visible: bool, press_hides: bool) -> bool {
         let start = Instant::now();
-        assert!(!panel.just_auto_hidden(start));
-        panel.auto_hidden(start);
-        assert!(panel.just_auto_hidden(start + Duration::from_millis(150)));
-        // Only that click: the next one opens it again.
-        assert!(!panel.just_auto_hidden(start + Duration::from_millis(200)));
-        // A click long after the panel hid opens it.
-        panel.auto_hidden(start);
-        assert!(!panel.just_auto_hidden(start + REOPEN_GUARD));
+        if press_hides {
+            panel.hidden_by_tray_press(start);
+        }
+        panel.left_pressed(visible, start);
+        panel.left_released(visible && !press_hides)
+    }
+
+    #[test]
+    fn a_tray_click_closes_an_open_panel_however_long_it_is_held() {
+        let panel = Panel::default();
+        // The press takes the panel's focus and hides it before the click arrives; the release
+        // (however late) closes rather than reopens.
+        assert!(click(&panel, false, true));
+        // Pinned, the press doesn't hide it; the click still closes it.
+        assert!(click(&panel, true, false));
+        // The press's own event can come before the focus loss it caused.
+        panel.left_pressed(true, Instant::now());
+        panel.hidden_by_tray_press(Instant::now());
+        assert!(panel.left_released(false));
+        // ...and that hide doesn't make the next click think the panel was open.
+        assert!(!click(&panel, false, false));
+    }
+
+    #[test]
+    fn a_tray_click_opens_a_closed_panel_however_soon_it_comes() {
+        let panel = Panel::default();
+        // Clicking elsewhere hid it (the pointer wasn't on the icon): a click right after opens.
+        assert!(!click(&panel, false, false));
+        // A right click (the menu) that hid it doesn't count as a left press later.
+        panel.hidden_by_tray_press(Instant::now());
+        panel.other_button();
+        assert!(!click(&panel, false, false));
+        // A hide whose press never reported doesn't swallow a later click.
+        let long_ago = Instant::now();
+        panel.hidden_by_tray_press(long_ago);
+        panel.left_pressed(false, long_ago + PRESS_MATCH);
+        assert!(!panel.left_released(false));
+        // A release without a press goes by whether the panel shows.
+        assert!(panel.left_released(true));
+        assert!(!panel.left_released(false));
     }
 
     #[test]
     fn sizes_fit_the_screen() {
-        assert_eq!(logical_size(PanelSize::Compact, 1032.0), (420.0, 680.0));
-        assert_eq!(logical_size(PanelSize::Roomy, 1032.0), (480.0, 720.0));
-        assert_eq!(logical_size(PanelSize::Fit, 1032.0), (440.0, 960.0));
-        assert_eq!(logical_size(PanelSize::Fit, 800.0), (440.0, 776.0));
-        // A short screen shrinks every size; a tiny one still gets a usable panel.
-        assert_eq!(logical_size(PanelSize::Roomy, 600.0), (480.0, 576.0));
-        assert_eq!(logical_size(PanelSize::Compact, 300.0), (420.0, 300.0));
+        assert_eq!(
+            logical_size(PanelSize::Compact, 1920.0, 1032.0),
+            (420.0, 680.0)
+        );
+        assert_eq!(
+            logical_size(PanelSize::Roomy, 1920.0, 1032.0),
+            (480.0, 720.0)
+        );
+        assert_eq!(logical_size(PanelSize::Fit, 1920.0, 1032.0), (440.0, 960.0));
+        assert_eq!(logical_size(PanelSize::Fit, 1920.0, 800.0), (440.0, 776.0));
+        // A small screen shrinks every size; a tiny one still gets a usable panel.
+        assert_eq!(
+            logical_size(PanelSize::Roomy, 1920.0, 600.0),
+            (480.0, 576.0)
+        );
+        assert_eq!(
+            logical_size(PanelSize::Roomy, 400.0, 1032.0),
+            (376.0, 720.0)
+        );
+        assert_eq!(
+            logical_size(PanelSize::Compact, 300.0, 300.0),
+            (300.0, 300.0)
+        );
+    }
+
+    #[test]
+    fn the_panel_stays_inside_the_work_area() {
+        let check = |screen: Area, work: Area, icon: Option<(f64, f64)>, scale: f64| {
+            for size in [PanelSize::Compact, PanelSize::Roomy, PanelSize::Fit] {
+                let (x, y, w, h) = bounds(&screen, &work, icon, size, scale);
+                assert!(
+                    x >= work.x && y >= work.y,
+                    "{size:?} at {scale}x starts outside"
+                );
+                assert!(
+                    x + w <= work.x + work.w && y + h <= work.y + work.h,
+                    "{size:?} at {scale}x runs past the work area: {x},{y} {w}x{h} in {work:?}"
+                );
+            }
+        };
+        // A 768-pixel-wide display at 200%: Compact alone would be 840 pixels wide.
+        let narrow = Area {
+            x: 0.0,
+            y: 0.0,
+            w: 768.0,
+            h: 1024.0,
+        };
+        check(
+            narrow,
+            Area { h: 944.0, ..narrow },
+            Some((740.0, 990.0)),
+            2.0,
+        );
+        // A portrait tablet at 250%, taskbar at the bottom, and odd scales that don't divide.
+        let tablet = Area {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 1280.0,
+        };
+        check(
+            tablet,
+            Area {
+                h: 1160.0,
+                ..tablet
+            },
+            None,
+            2.5,
+        );
+        check(
+            SCREEN,
+            Area {
+                h: 1032.0,
+                ..SCREEN
+            },
+            Some((1800.0, 1056.0)),
+            1.25,
+        );
+        check(
+            SCREEN,
+            Area {
+                h: 1032.0,
+                ..SCREEN
+            },
+            Some((1800.0, 1056.0)),
+            1.75,
+        );
+        // A second monitor left of the primary, taskbar on its left edge.
+        let second = Area {
+            x: -1280.0,
+            y: 0.0,
+            w: 1280.0,
+            h: 720.0,
+        };
+        check(
+            second,
+            Area {
+                x: -1232.0,
+                w: 1232.0,
+                ..second
+            },
+            Some((-1256.0, 700.0)),
+            1.5,
+        );
+        // At 100% on a common screen, nothing changes: Compact is 420 × 680.
+        let (_, _, w, h) = bounds(
+            &SCREEN,
+            &Area {
+                h: 1032.0,
+                ..SCREEN
+            },
+            None,
+            PanelSize::Compact,
+            1.0,
+        );
+        assert_eq!((w, h), (420.0, 680.0));
+    }
+
+    #[test]
+    fn the_pointer_is_on_the_icon_up_to_its_edges() {
+        let icon = Area {
+            x: 1800.0,
+            y: 1040.0,
+            w: 32.0,
+            h: 40.0,
+        };
+        assert!(icon.contains(1816.0, 1060.0));
+        assert!(icon.contains(1800.0, 1040.0) && icon.contains(1832.0, 1080.0));
+        assert!(!icon.contains(1799.0, 1060.0) && !icon.contains(1816.0, 1081.0));
     }
 }
