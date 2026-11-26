@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { fade } from "svelte/transition";
-  import { activeDownloadCount, app, init, isMobile, receive, splashing, toast, type View } from "./lib/store.svelte";
+  import { activeDownloadCount, app, init, isMobile, receive, setPinned, splashing, toast, type View } from "./lib/store.svelte";
   import { compactCount, exactCount } from "./lib/format";
-  import { message } from "./lib/api";
+  import { api, message } from "./lib/api";
   import SendView from "./lib/SendView.svelte";
   import ReceiveView from "./lib/ReceiveView.svelte";
   import SettingsView from "./lib/SettingsView.svelte";
@@ -61,6 +61,18 @@
     document.getElementById("updates-heading")?.focus();
   }
 
+  /** Escape puts the panel away, unless something on the page used it (closing a dialog or an
+   *  expanded share). Those handlers may run after this one, so it decides once they all have. */
+  function escapeHidesPanel(e: KeyboardEvent) {
+    if (!app.panel || e.key !== "Escape" || document.querySelector("dialog[open]")) return;
+    setTimeout(() => {
+      if (!e.defaultPrevented) void api.hidePanel().catch(() => {});
+    });
+  }
+
+  /** Phone-shaped screens: the phone itself, or the narrow tray panel. */
+  const narrow = $derived(isMobile() || app.panel);
+
   const reach = $derived.by(() => {
     if (!app.status) return { level: "off", text: "Starting…" };
     if (app.status.relayUrl) return { level: "on", text: "Reachable from anywhere" };
@@ -95,14 +107,22 @@
   </g>
 </svg>
 
+<svelte:window onkeydown={escapeHidesPanel} />
+
 {#if app.showArtwork === true}
-  <Scene mode={sceneMode} phone={isMobile()} />
+  <Scene mode={sceneMode} phone={narrow} panel={app.panel} />
 {/if}
 
-<div class="shell" class:phone={isMobile()} inert={splashing()}>
+<div
+  class="shell"
+  class:phone={isMobile()}
+  class:panel={app.panel}
+  class:over-art={narrow && app.showArtwork === true && sceneMode === "hero"}
+  inert={splashing()}
+>
   <nav class="glass" aria-label="Main">
     <div class="brand">
-      <img src="/ferry-icon.png" alt="" width="40" height="40" />
+      <img src="/ferry-icon.png" alt="" width={app.panel ? 30 : 40} height={app.panel ? 30 : 40} />
       <span>Ferry</span>
     </div>
 
@@ -130,6 +150,29 @@
       <span class="dot" aria-hidden="true"></span>
       {reach.text}
     </p>
+
+    {#if app.panel}
+      <button
+        class="pin"
+        class:on={app.pinned}
+        aria-pressed={app.pinned}
+        aria-label="Keep Ferry open"
+        title={app.pinned
+          ? "Ferry stays open. Click to let it hide when you click elsewhere."
+          : "Keep Ferry open, e.g. to drag files in from Explorer"}
+        onclick={() => setPinned(!app.pinned)}
+      >
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+          <path
+            d="M15 3l6 6-2.5.8-3.7 3.7.7 4.7-1.4 1.4-4.2-4.2L5 20l-1-1 4.6-4.9-4.2-4.2 1.4-1.4 4.7.7 3.7-3.7z"
+            fill={app.pinned ? "currentColor" : "none"}
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linejoin="round"
+          />
+        </svg>
+      </button>
+    {/if}
   </nav>
 
   <main>
@@ -160,7 +203,7 @@
 {#if app.dragging}
   <!-- Shown while files are dragged over the window; the drop itself goes to Tauri. Screen
        readers get the same words from the live region below, so this copy is hidden from them. -->
-  <div class="drop" class:artwork={app.showArtwork === true} transition:fade={{ duration: motion(150) }} aria-hidden="true">
+  <div class="drop" class:artwork={app.showArtwork === true && !app.panel} transition:fade={{ duration: motion(150) }} aria-hidden="true">
     <div class="drop-words">
       <p class="drop-title">{drop.title}</p>
       <p class="muted">{drop.detail}</p>
@@ -172,7 +215,7 @@
 <p class="sr-only" role="status">{app.dragging ? `${drop.title}. ${drop.detail}` : ""}</p>
 
 {#if splashing()}
-  <Splash artwork={app.showArtwork} phone={isMobile()} ready={app.ready} ondone={() => (app.introDone = true)} />
+  <Splash artwork={app.showArtwork} phone={narrow} ready={app.ready} ondone={() => (app.introDone = true)} />
 {/if}
 
 <style>
@@ -448,6 +491,103 @@
 
   .toast.phone {
     bottom: calc(5rem + env(safe-area-inset-bottom));
+  }
+
+  /* On phone-shaped screens the mascot sits behind the words of an empty screen; a soft dark
+     halo keeps them readable over her. Only then: content brings its own glass and paper. */
+  .shell.over-art main {
+    text-shadow:
+      0 0 10px rgb(8 6 11 / 0.9),
+      0 1px 3px rgb(8 6 11 / 0.8);
+  }
+
+  /* The Windows tray panel: a header like a tray flyout's (brand, reachability, pin) over a row
+     of tabs, then the content. It is narrow, so this follows the narrow layout below. */
+  .shell.panel nav.glass {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    grid-template-areas:
+      "brand reach pin"
+      "tabs tabs tabs";
+    align-items: center;
+    gap: 0.6rem 0.75rem;
+    padding: 0.7rem 0.75rem 0.55rem;
+    border-width: 0 0 1px 0;
+  }
+
+  .shell.panel .brand {
+    grid-area: brand;
+    padding: 0;
+    font-size: var(--t-md);
+  }
+
+  .shell.panel .brand img {
+    border-radius: 8px;
+  }
+
+  .shell.panel .brand span {
+    display: inline;
+  }
+
+  .shell.panel ul {
+    grid-area: tabs;
+    display: flex;
+    gap: 0.3rem;
+  }
+
+  .shell.panel li {
+    flex: 1;
+  }
+
+  .shell.panel .tab {
+    justify-content: center;
+    padding: 0.45rem 0.5rem;
+  }
+
+  .shell.panel .tab.active {
+    background: var(--magenta-soft);
+    box-shadow: inset 0 -2px 0 var(--magenta);
+  }
+
+  .shell.panel .reach {
+    grid-area: reach;
+    justify-self: end;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .pin {
+    grid-area: pin;
+    display: grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    border-color: transparent;
+    background: transparent;
+    color: var(--ink-soft);
+  }
+
+  .pin:hover:not(:disabled) {
+    color: var(--ink);
+    background: var(--glass);
+    border-color: transparent;
+  }
+
+  .pin.on {
+    color: var(--magenta);
+    background: var(--magenta-soft);
+    border-color: rgb(255 45 149 / 0.3);
+  }
+
+  .shell.panel main {
+    padding: 1.1rem 1rem 1.5rem;
+  }
+
+  .shell.panel :global(h1) {
+    font-size: var(--t-xl);
   }
 
   @media (max-width: 820px) {

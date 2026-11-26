@@ -11,6 +11,8 @@ mod android;
 mod android_send;
 #[cfg(target_os = "android")]
 mod android_updates;
+#[cfg(desktop)]
+mod panel;
 mod phone;
 #[cfg(desktop)]
 mod updates;
@@ -52,6 +54,29 @@ struct Settings {
     /// Show the mascot artwork behind the UI. Missing from settings saved before it existed.
     #[serde(default = "yes")]
     show_artwork: bool,
+    /// Tray panel or regular window. Only Windows has the panel; elsewhere this is ignored.
+    #[serde(default)]
+    window_style: WindowStyle,
+    #[serde(default)]
+    panel_size: PanelSize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum WindowStyle {
+    #[default]
+    Panel,
+    Window,
+}
+
+/// The tray panel's size: two fixed sizes, or as tall as the screen allows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum PanelSize {
+    #[default]
+    Compact,
+    Roomy,
+    Fit,
 }
 
 fn default_auto_check_updates() -> bool {
@@ -99,6 +124,8 @@ fn load_settings(path: &Path, default_download_dir: PathBuf) -> Settings {
         close_to_tray: true,
         auto_check_updates: default_auto_check_updates(),
         show_artwork: true,
+        window_style: WindowStyle::default(),
+        panel_size: PanelSize::default(),
     };
     let Some(mut settings) = std::fs::read(path)
         .ok()
@@ -110,6 +137,11 @@ fn load_settings(path: &Path, default_download_dir: PathBuf) -> Settings {
         settings.download_dir = defaults.download_dir;
     }
     settings
+}
+
+/// Whether Ferry is a tray panel rather than a window (Windows only).
+fn panel_enabled(settings: &Settings) -> bool {
+    cfg!(windows) && settings.window_style == WindowStyle::Panel
 }
 
 /// Settings coming from the UI must be usable, so a typo can't break the next start.
@@ -321,7 +353,12 @@ fn save_settings(path: &Path, settings: &Settings) -> CmdResult<()> {
 
 /// Save settings. Returns `true` when a restart is needed for them to take effect.
 #[tauri::command]
-fn set_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult<bool> {
+#[cfg_attr(mobile, allow(unused_variables))]
+fn set_settings(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mut settings: Settings,
+) -> CmdResult<bool> {
     validate_settings(&settings)?;
     let mut saved = state.settings.lock().unwrap();
     settings.auto_check_updates = saved.auto_check_updates;
@@ -331,7 +368,14 @@ fn set_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult
     }
     save_settings(&state.settings_path, &settings)?;
     let restart = settings.relay != *state.node.relay();
-    *saved = settings;
+    let restyle =
+        settings.window_style != saved.window_style || settings.panel_size != saved.panel_size;
+    *saved = settings.clone();
+    drop(saved);
+    #[cfg(desktop)]
+    if restyle && let Some(window) = app.get_webview_window("main") {
+        panel::apply_style(&window, &settings, true);
+    }
     Ok(restart)
 }
 
@@ -438,10 +482,19 @@ fn accept_links(app: &AppHandle, args: impl IntoIterator<Item = String>) {
 // Mobile apps have a single window the OS brings forward.
 #[cfg(desktop)]
 fn show_main(app: &AppHandle) {
+    show_main_at(app, None);
+}
+
+/// Shows the main window; the panel opens by the tray icon, at `icon` when a click gave it.
+#[cfg(desktop)]
+fn show_main_at(app: &AppHandle, icon: Option<tauri::Rect>) {
     if let Some(window) = app.get_webview_window("main") {
         // Once the window has been shown (here by the tray or a second launch too), the startup
         // reveal must not show it again: it may since have been closed to the tray.
         STARTUP_SHOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(size) = panel::current(app) {
+            panel::place(&window, size, icon);
+        }
         window.show().ok();
         window.unminimize().ok();
         window.set_focus().ok();
@@ -513,10 +566,16 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
+                rect,
                 ..
             } = event
             {
-                show_main(tray.app_handle());
+                let app = tray.app_handle();
+                if panel::current(app).is_some() {
+                    panel::toggle(app, rect);
+                } else {
+                    show_main(app);
+                }
             }
         });
     if let Some(icon) = app.default_window_icon() {
@@ -805,7 +864,14 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     #[cfg(desktop)]
-    build_tray(app)?;
+    {
+        build_tray(app)?;
+        // Before the window first shows, so a panel never appears as a window first.
+        if let Some(window) = app.get_webview_window("main") {
+            let settings = app.state::<AppState>().settings.lock().unwrap().clone();
+            panel::apply_style(&window, &settings, false);
+        }
+    }
     // In case the page never reports that it loaded, the window still appears.
     #[cfg(desktop)]
     {
@@ -861,7 +927,8 @@ pub fn run() {
         }));
         builder = builder
             .plugin(tauri_plugin_updater::Builder::new().build())
-            .manage(updates::PendingUpdate::default());
+            .manage(updates::PendingUpdate::default())
+            .manage(panel::Panel::default());
     }
     let app = builder
         .plugin(tauri_plugin_deep_link::init())
@@ -880,25 +947,30 @@ pub fn run() {
     #[cfg(desktop)]
     let app = app.on_page_load(|webview, payload| {
         // Not when startup failed: its error dialog is all there is to show.
-        if payload.event() == tauri::webview::PageLoadEvent::Finished
-            && webview.label() == "main"
-            && webview.try_state::<AppState>().is_some()
-        {
-            show_at_startup(webview.app_handle());
+        if payload.event() == tauri::webview::PageLoadEvent::Finished && webview.label() == "main" {
+            panel::reset_holds(webview.app_handle());
+            if webview.try_state::<AppState>().is_some() {
+                show_at_startup(webview.app_handle());
+            }
         }
     });
     let app = app
         .setup(setup)
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let to_tray = window
-                    .try_state::<AppState>()
-                    .is_some_and(|s| s.settings.lock().unwrap().close_to_tray);
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
+                // A panel always goes back to the tray.
+                let to_tray = window.try_state::<AppState>().is_some_and(|s| {
+                    let settings = s.settings.lock().unwrap();
+                    settings.close_to_tray || panel_enabled(&settings)
+                });
                 if to_tray {
                     api.prevent_close();
                     window.hide().ok();
                 }
             }
+            #[cfg(desktop)]
+            WindowEvent::Focused(false) => panel::on_blur(window),
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             node_status,
@@ -927,6 +999,12 @@ pub fn run() {
             updates::check_for_updates,
             #[cfg(desktop)]
             updates::install_update,
+            #[cfg(desktop)]
+            panel::set_panel_pinned,
+            #[cfg(desktop)]
+            panel::panel_hold,
+            #[cfg(desktop)]
+            panel::hide_panel,
             #[cfg(target_os = "android")]
             android_updates::update_info,
             #[cfg(target_os = "android")]
@@ -1024,6 +1102,8 @@ mod tests {
             close_to_tray: true,
             auto_check_updates: true,
             show_artwork: true,
+            window_style: WindowStyle::Panel,
+            panel_size: PanelSize::Compact,
         };
         assert!(validate_settings(&ok).is_ok());
         let bad_relay = Settings {
@@ -1067,6 +1147,27 @@ mod tests {
         assert!(!settings.close_to_tray);
         assert!(settings.show_artwork);
         assert!(settings.auto_check_updates);
+        assert_eq!(settings.window_style, WindowStyle::Panel);
+        assert_eq!(settings.panel_size, PanelSize::Compact);
+    }
+
+    #[test]
+    fn window_style_and_panel_size_round_trip() {
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "downloadDir": std::env::temp_dir(),
+            "relay": { "mode": "disabled" },
+            "closeToTray": true,
+            "windowStyle": "window",
+            "panelSize": "fit",
+        }))
+        .unwrap();
+        assert_eq!(settings.window_style, WindowStyle::Window);
+        assert_eq!(settings.panel_size, PanelSize::Fit);
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["windowStyle"], "window");
+        assert_eq!(json["panelSize"], "fit");
+        let roomy: PanelSize = serde_json::from_value(serde_json::json!("roomy")).unwrap();
+        assert_eq!(roomy, PanelSize::Roomy);
     }
 
     #[test]

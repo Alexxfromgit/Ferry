@@ -2,7 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { api, message } from "./api";
 import { plural } from "./format";
-import type { AppInfo, DownloadInfo, FerryEvent, NodeStatus, Preview, SaveState, ShareActivity, ShareInfo } from "./types";
+import type { AppInfo, DownloadInfo, FerryEvent, NodeStatus, Preview, SaveState, ShareActivity, ShareInfo, WindowStyle } from "./types";
 
 export type View = "send" | "receive" | "settings";
 export type DragKind = "files" | "tickets";
@@ -49,6 +49,10 @@ export const app = $state({
   /** Mirrors the saved setting, so the backdrop can follow it without reloading settings.
    *  Null until it has loaded, so artwork never shows to someone who turned it off. */
   showArtwork: null as boolean | null,
+  /** Windows: Ferry is a panel by the tray icon rather than a window. Known with showArtwork. */
+  panel: false,
+  /** The panel stays open when focus moves away (e.g. to drag files in from Explorer). */
+  pinned: false,
   toast: null as { text: string; error: boolean } | null,
   /** Bumped when share links may have changed (e.g. the relay connected); QR codes refetch. */
   linkEpoch: 0,
@@ -324,23 +328,46 @@ async function refreshStatus() {
   }
 }
 
-/** Loads the artwork setting. If settings can't be read, the default (on) applies. */
-async function loadArtworkSetting() {
+/** Loads the settings that shape the screen: artwork, and panel or window. The panel is known
+ *  first, as the splash starts once the artwork setting is. If settings can't be read, the
+ *  defaults apply. */
+async function loadDisplaySettings() {
   try {
-    app.showArtwork = (await api.getSettings()).showArtwork;
+    const [settings, info] = await Promise.all([api.getSettings(), api.appInfo()]);
+    app.panel = isPanelStyle(info, settings.windowStyle);
+    app.showArtwork = settings.showArtwork;
   } catch {
     app.showArtwork = true;
   }
 }
 
+/** Only Windows has the tray panel; elsewhere the setting is ignored. */
+export function isPanelStyle(info: AppInfo, style: WindowStyle | undefined): boolean {
+  return info.platform === "windows" && !info.mobile && (style ?? "panel") === "panel";
+}
+
+export function isPanel(): boolean {
+  return app.panel;
+}
+
+export async function setPinned(pinned: boolean) {
+  app.pinned = pinned;
+  try {
+    await api.setPanelPinned(pinned);
+  } catch (err) {
+    app.pinned = !pinned;
+    toast(message(err), true);
+  }
+}
+
 export async function init() {
   // Started first so it runs alongside the rest, and awaited even if the rest fails: the
-  // splash and backdrop must not settle before the saved setting is known.
-  const artworkSetting = loadArtworkSetting();
+  // splash and backdrop must not settle before the saved settings are known.
+  const displaySettings = loadDisplaySettings();
   try {
     await initRest();
   } finally {
-    await artworkSetting;
+    await displaySettings;
   }
 }
 

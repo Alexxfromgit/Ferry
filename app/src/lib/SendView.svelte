@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { open } from "@tauri-apps/plugin-dialog";
-  import { app, isMobile, setShareLayout, share, shareFromPhone } from "./store.svelte";
+  import { open } from "./dialogs";
+  import { app, isMobile, setPinned, setShareLayout, share, shareFromPhone } from "./store.svelte";
   import { bytes, exactCount } from "./format";
   import ShareStrip from "./ShareStrip.svelte";
   import ShareTicket from "./ShareTicket.svelte";
@@ -23,6 +23,8 @@
 
   function closeOnEscape(e: KeyboardEvent) {
     if (e.key === "Escape" && expanded && !(e.target as Element | null)?.closest("dialog")) {
+      // Handled here, so the tray panel doesn't also hide.
+      e.preventDefault();
       const id = expanded;
       expanded = null;
       // Return focus to the strip that was opened.
@@ -54,6 +56,12 @@
       Choose files or a folder, or share them to Ferry from any app. Ferry keeps a copy and makes a
       ticket; they download directly from your phone while sharing is on.
     </p>
+  {:else if app.panel}
+    <h1>Send files straight from this computer</h1>
+    <p class="muted lede">
+      Ferry makes a ticket you can send to anyone; they download directly from you while Ferry is
+      running.
+    </p>
   {:else}
     <h1>Send files straight from this computer</h1>
     <p class="muted lede">
@@ -80,7 +88,11 @@
     <div class="actions">
       <button class="primary" onclick={() => pick(false)}>Choose files</button>
       <button onclick={() => pick(true)}>Choose a folder</button>
-      {#if !isMobile()}<span class="muted hint">or drop them here</span>{/if}
+      {#if app.panel && !app.pinned}
+        <span class="muted hint">
+          or <button class="link" onclick={() => setPinned(true)}>pin Ferry</button> and drop them here
+        </span>
+      {:else if !isMobile()}<span class="muted hint">or drop them here</span>{/if}
     </div>
   {/if}
   </div>
@@ -280,5 +292,23 @@
     display: grid;
     gap: 1.4rem;
     max-width: 800px;
+  }
+
+  /* "pin Ferry" in the drop hint: a word in the sentence, not a button shape. */
+  .hint .link,
+  .hint .link:hover:not(:disabled) {
+    display: inline;
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: var(--ink);
+    text-decoration: underline;
+    text-decoration-color: rgb(255 45 149 / 0.6);
+    text-underline-offset: 2px;
+  }
+
+  .hint .link:hover:not(:disabled) {
+    color: var(--magenta);
   }
 </style>

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ask } from "@tauri-apps/plugin-dialog";
+  import { ask } from "./dialogs";
   import { api, message } from "./api";
   import { bytes, duration, shortId } from "./format";
   import { app, isMobile, toast } from "./store.svelte";

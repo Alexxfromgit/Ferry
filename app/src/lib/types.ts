@@ -97,11 +97,18 @@ export type RelayChoice =
   | { mode: "disabled" }
   | { mode: "custom"; url: string };
 
+/** Windows: a panel by the tray icon, or a regular movable window. */
+export type WindowStyle = "panel" | "window";
+/** The tray panel's size: two fixed sizes, or as tall as the screen allows. */
+export type PanelSize = "compact" | "roomy" | "fit";
+
 export interface Settings {
   downloadDir: string;
   relay: RelayChoice;
   closeToTray: boolean;
   showArtwork: boolean;
+  windowStyle: WindowStyle;
+  panelSize: PanelSize;
 }
 
 export interface AppInfo {

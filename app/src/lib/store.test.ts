@@ -378,3 +378,16 @@ describe("artwork", () => {
     expect(app.showArtwork).toBe(true);
   });
 });
+
+describe("isPanelStyle", () => {
+  it("is the tray panel only on Windows desktops that choose it", async () => {
+    const { isPanelStyle } = await import("./store.svelte");
+    const windows = { platform: "windows", mobile: false, distribution: "desktop" } as const;
+    expect(isPanelStyle(windows, "panel")).toBe(true);
+    expect(isPanelStyle(windows, undefined)).toBe(true);
+    expect(isPanelStyle(windows, "window")).toBe(false);
+    expect(isPanelStyle({ ...windows, platform: "macos" }, "panel")).toBe(false);
+    expect(isPanelStyle({ ...windows, platform: "linux" }, "panel")).toBe(false);
+    expect(isPanelStyle({ platform: "android", mobile: true, distribution: "play" }, "panel")).toBe(false);
+  });
+});

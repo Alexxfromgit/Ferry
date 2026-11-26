@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { open } from "./dialogs";
   import { api, message } from "./api";
   import { bytes, exactCount, plural } from "./format";
   import {

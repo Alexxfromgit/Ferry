@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { save } from "@tauri-apps/plugin-dialog";
+  import { save } from "./dialogs";
   import { api, message } from "./api";
   import { bytes, duration, plural, shortId, shortPath } from "./format";
   import { copyLink, removeShare, sendLink, setSharing, shareAgain, statusLine } from "./shareActions";
