@@ -34,6 +34,12 @@
     }
   }
 
+  /** The hint's "pin Ferry" goes away once pinned, so focus moves to the pin it switched on. */
+  function pinFromHint() {
+    void setPinned(true);
+    document.querySelector<HTMLElement>("nav .pin")?.focus();
+  }
+
   async function pick(directory: boolean) {
     // Phones pick through Android's own pickers; Ferry copies what is picked, then shares it.
     if (isMobile()) return shareFromPhone(directory ? "folder" : "files");
@@ -90,7 +96,7 @@
       <button onclick={() => pick(true)}>Choose a folder</button>
       {#if app.panel && !app.pinned}
         <span class="muted hint">
-          or <button class="link" onclick={() => setPinned(true)}>pin Ferry</button> and drop them here
+          or <button class="link" onclick={pinFromHint}>pin Ferry</button> and drop them here
         </span>
       {:else if !isMobile()}<span class="muted hint">or drop them here</span>{/if}
     </div>

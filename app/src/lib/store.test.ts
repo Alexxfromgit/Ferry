@@ -391,3 +391,37 @@ describe("isPanelStyle", () => {
     expect(isPanelStyle({ platform: "android", mobile: true, distribution: "play" }, "panel")).toBe(false);
   });
 });
+
+describe("tray panel", () => {
+  it("is known from the settings by the time startup is done", async () => {
+    backend.app_info = () => ({ platform: "windows", mobile: false, distribution: "desktop" });
+    const { app } = await freshStore();
+    // Settings saved before the option existed have no windowStyle: the panel is the default.
+    expect(app.panel).toBe(true);
+    backend.get_settings = () => ({
+      downloadDir: "/d",
+      relay: { mode: "default" },
+      closeToTray: true,
+      showArtwork: true,
+      windowStyle: "window",
+    });
+    expect((await freshStore()).app.panel).toBe(false);
+  });
+
+  it("pins, and shows it unpinned again when that fails", async () => {
+    const pins: boolean[] = [];
+    backend.set_panel_pinned = ({ pinned }) => {
+      pins.push(pinned);
+    };
+    const { app, setPinned } = await freshStore();
+    await setPinned(true);
+    expect(app.pinned).toBe(true);
+    backend.set_panel_pinned = () => {
+      throw new Error("no panel");
+    };
+    await setPinned(false);
+    expect(app.pinned).toBe(true);
+    expect(app.toast).toEqual({ text: "no panel", error: true });
+    expect(pins).toEqual([true]);
+  });
+});

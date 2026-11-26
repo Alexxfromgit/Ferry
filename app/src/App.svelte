@@ -62,9 +62,10 @@
   }
 
   /** Escape puts the panel away, unless something on the page used it (closing a dialog or an
-   *  expanded share). Those handlers may run after this one, so it decides once they all have. */
+   *  expanded share) or an input method (cancelling what's being composed). Those handlers may
+   *  run after this one, so it decides once they all have. */
   function escapeHidesPanel(e: KeyboardEvent) {
-    if (!app.panel || e.key !== "Escape" || document.querySelector("dialog[open]")) return;
+    if (!app.panel || e.key !== "Escape" || e.isComposing || document.querySelector("dialog[open]")) return;
     setTimeout(() => {
       if (!e.defaultPrevented) void api.hidePanel().catch(() => {});
     });
