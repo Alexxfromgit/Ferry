@@ -8,11 +8,13 @@ relay server does, and what to expect on difficult networks.
 
 - Every Ferry install has a permanent **device ID**: a public key, created on first start and
   stored in the app's data folder.
-- A share link (`https://ferry.xenvaultinteractive.com/s#…`), a `.ferry` ticket file and the QR
-  code all carry the same two things: the sender's **device ID** and the share's **token**, a
+- A share link (short: `https://ferry.xenvaultinteractive.com/s/K7X2QP9A4MZT`, or full:
+  `…/s#…`), a `.ferry` ticket file and the QR code all carry the same two things: the sender's **device ID** and the share's **token**, a
   random secret made for that share. They don't contain the sender's IP addresses or anything
   about the files. The link data sits after the `#`, which browsers never send to the web
   server; the page there only hands the link to Ferry (`ferry://s#…`) or offers to install it.
+  A short link's code is looked up through Ferry's link service; [Share links](LINKS.md)
+  explains the formats and what the service sees.
 - The recipient's Ferry connects to the sender's device ID, through hole punching or an
   **encrypted relay**, and presents the token. The sender's Ferry checks it (and the share's
   password, if it has one) before it serves anything. Without the token, knowing what is shared

@@ -150,8 +150,26 @@
           <span>No relays <span class="muted hint">Only direct connections. Many people abroad won't reach you.</span></span>
         </label>
       </fieldset>
+      <label class="check">
+        <input
+          type="checkbox"
+          bind:checked={settings.shortLinks}
+          disabled={relayMode === "disabled"}
+          onchange={persist}
+        />
+        <span>
+          Short links
+          <span class="muted hint">
+            Links like ferry.xenvaultinteractive.com/s/K7X2-QP9A-4MZT, through Ferry's link service. For
+            each share it stores your device ID, the share's code and token, and your relay: whoever
+            runs it could open shares that have no password, like anyone with the link. It never
+            stores files, file names or IP addresses. Off: longer links that work without it, and
+            your existing short links stop working. Needs relays.
+          </span>
+        </span>
+      </label>
       {#if restartNeeded}
-        <p class="restart">Restart Ferry to use the new relay setting.</p>
+        <p class="restart">Restart Ferry to use the new connection settings.</p>
       {/if}
     </section>
 

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { save } from "@tauri-apps/plugin-dialog";
   import { api, message } from "./api";
-  import { bytes, duration, formatCode, plural, shortPath } from "./format";
+  import { bytes, duration, formatCode, plural, shortId, shortPath } from "./format";
   import { copyLink, removeShare, sendLink, setSharing, shareAgain, statusLine } from "./shareActions";
   import ShareSwitch from "./ShareSwitch.svelte";
   import { app, isMobile, toast } from "./store.svelte";
@@ -15,10 +15,12 @@
   let passwordProblem = $state("");
   let saving = $state(false);
 
-  // Re-fetch when the share changes or its link may have changed (relay connected).
+  // Re-fetch when the share changes or its link may have changed (relay connected, or the
+  // short link became available).
   $effect(() => {
     const id = share.id;
     void app.linkEpoch;
+    void share.link;
     api.shareQr(id).then((svg) => (qr = svg)).catch(() => (qr = null));
   });
 
@@ -309,7 +311,12 @@
           {/if}
           {#if paused}<span class="qr-off">Sharing is off</span>{/if}
         </button>
-        <p class="number code" title="Share code">{formatCode(share.code)}</p>
+        <!-- The code opens the share only once the link service knows it. -->
+        {#if share.link.includes("/s/")}
+          <p class="number code" title="Share code">{formatCode(share.code)}</p>
+        {:else}
+          <p class="number code" title={share.id}>No. {shortId(share.id)}</p>
+        {/if}
         <svg
           class="barcode"
           viewBox="0 0 {barcode.width} 10"

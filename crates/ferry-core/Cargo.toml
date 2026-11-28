@@ -13,6 +13,9 @@ blake3 = "1"
 data-encoding = "2"
 getrandom = "0.3"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
+# The same HTTP client and TLS settings iroh uses for its own HTTPS requests.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false }
 iroh.workspace = true
 iroh-blobs.workspace = true
 irpc.workspace = true

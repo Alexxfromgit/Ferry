@@ -52,6 +52,9 @@ struct Settings {
     /// Show the mascot artwork behind the UI. Missing from settings saved before it existed.
     #[serde(default = "yes")]
     show_artwork: bool,
+    /// Make short links through Ferry's link service (and open them).
+    #[serde(default = "yes")]
+    short_links: bool,
 }
 
 fn default_auto_check_updates() -> bool {
@@ -107,6 +110,7 @@ fn load_settings(path: &Path, default_download_dir: PathBuf) -> Settings {
         close_to_tray: true,
         auto_check_updates: default_auto_check_updates(),
         show_artwork: true,
+        short_links: true,
     };
     let Some(mut settings) = std::fs::read(path)
         .ok()
@@ -342,7 +346,14 @@ fn set_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult
         settings.download_dir = saved.download_dir.clone();
     }
     save_settings(&state.settings_path, &settings)?;
-    let restart = settings.relay != *state.node.relay();
+    // Short links switch at once: off also takes the existing ones off the link service. Only
+    // turning them on in a run started without them needs a restart.
+    {
+        let _runtime = tauri::async_runtime::handle().inner().enter();
+        state.node.set_short_links(settings.short_links);
+    }
+    let restart = settings.relay != *state.node.relay()
+        || settings.short_links != state.node.uses_link_service();
     *saved = settings;
     Ok(restart)
 }
@@ -783,6 +794,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = Config::new(node_dir(app)?);
     config.relay = settings.relay.clone();
+    // With short links off, the link service is only asked to remove codes registered before.
+    config.short_links = settings.short_links;
     let node = match tauri::async_runtime::block_on(Node::start(config)) {
         Ok(node) => node,
         Err(e) => {
@@ -1037,6 +1050,7 @@ mod tests {
             close_to_tray: true,
             auto_check_updates: true,
             show_artwork: true,
+            short_links: true,
         };
         assert!(validate_settings(&ok).is_ok());
         let bad_relay = Settings {
@@ -1060,6 +1074,7 @@ mod tests {
         }))
         .unwrap();
         assert!(settings.auto_check_updates);
+        assert!(settings.short_links, "short links are on unless turned off");
         assert!(!settings.close_to_tray);
         assert_eq!(settings.relay, RelayChoice::Disabled);
     }

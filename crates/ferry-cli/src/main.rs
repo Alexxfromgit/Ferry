@@ -28,6 +28,11 @@ struct Cli {
     #[arg(long, global = true, default_value = "default")]
     relay: String,
 
+    /// Share full links only, and don't open short ones. Ferry still asks its link service to
+    /// remove short links it registered before, when their shares are removed.
+    #[arg(long, global = true)]
+    no_short_links: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -92,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
     relay.validate()?;
     let mut config = Config::new(data_dir);
     config.relay = relay.clone();
+    config.short_links = !cli.no_short_links;
     // A one-shot tool should not quietly continue old downloads in the background.
     config.resume_downloads = false;
     let node = Node::start(config).await?;
@@ -153,7 +159,7 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                 }
             });
             // The password is set as the share is made, so it is never served without it.
-            let share = node.create_share_with_password(paths, password).await?;
+            let mut share = node.create_share_with_password(paths, password).await?;
             progress.abort();
             eprintln!();
             println!(
@@ -180,8 +186,23 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                 node.save_share_file(&share.id, &path).await?;
                 println!("share file written to {}", path.display());
             }
+            // The short link follows once the link service has it; give it a moment.
+            if node.short_links_on() {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+                while !share.link.contains("/s/") && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    if let Some(current) = node.share(&share.id) {
+                        share = current;
+                    }
+                }
+                if !share.link.contains("/s/") {
+                    eprintln!("note: the link service didn't answer; this is the full link");
+                }
+            }
             println!("\nsend this link to the recipient:\n\n{}\n", share.link);
-            println!("share code: {}", format_code(&share.code));
+            if share.link.contains("/s/") {
+                println!("share code: {}", format_code(&share.code));
+            }
             if share.locked {
                 println!("recipients need the password; send it separately.");
             }

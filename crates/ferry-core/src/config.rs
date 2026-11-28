@@ -64,6 +64,16 @@ pub struct Config {
     pub address_lookup: bool,
     /// Resume downloads that were running when the node last stopped.
     pub resume_downloads: bool,
+    /// The short-link service (`https://host`), or `None` to make only full links and never
+    /// contact it. Short links also need relays.
+    pub links_service: Option<String>,
+    /// Make and open short links. When off, the link service is only told to remove codes
+    /// registered before, which it keeps otherwise until they expire.
+    pub short_links: bool,
+    /// Another place to find devices by id, besides n0's DNS service. For tests, where nodes
+    /// share one in-memory book instead of using the internet.
+    #[doc(hidden)]
+    pub address_book: Option<iroh::address_lookup::MemoryLookup>,
 }
 
 impl Config {
@@ -73,6 +83,9 @@ impl Config {
             relay: RelayChoice::Default,
             address_lookup: true,
             resume_downloads: true,
+            links_service: Some(crate::DEFAULT_LINK_SERVICE.to_string()),
+            short_links: true,
+            address_book: None,
         }
     }
 
@@ -83,6 +96,9 @@ impl Config {
             relay: RelayChoice::Disabled,
             address_lookup: false,
             resume_downloads: true,
+            links_service: None,
+            short_links: true,
+            address_book: None,
         }
     }
 }

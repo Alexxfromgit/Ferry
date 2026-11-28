@@ -6,7 +6,8 @@ test identities when you can. [Report a vulnerability](https://github.com/Alexxf
 
 Reports about link and ticket parsing, files written outside the chosen destination, access to
 stopped or password-locked shares (the `ferry/1` protocol in `crates/ferry-core/src/protocol.rs`),
-or unintended exposure of files, share tokens, passwords and device keys are especially useful.
+the short-link service and its checks ([docs/LINKS.md](docs/LINKS.md)), or unintended exposure
+of files, share tokens, passwords and device keys are especially useful.
 
 Security fixes target the latest release. For general bugs, use the
 [issue tracker](https://github.com/Alexxfromgit/Ferry/issues). Ferry's

@@ -110,6 +110,10 @@ pub struct DownloadInfo {
     /// Empty for downloads started by Ferry 0.3 and earlier, which can't be resumed.
     #[serde(default)]
     pub link: String,
+    /// The sender's home relay, when a short link's lookup gave one the sender signed. Kept
+    /// so resuming can reach the sender the same way, even where address lookup can't.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
     pub dest_dir: PathBuf,
     pub name: String,
     pub status: DownloadStatus,
@@ -144,6 +148,14 @@ pub struct Registry {
     /// secrets in it never reach the UI.
     #[serde(default)]
     pub access: BTreeMap<String, ShareAccess>,
+    /// Short codes still to be removed from the link service (of removed shares, or of all
+    /// shares when short links were turned off), kept until the service confirms.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_removals: Vec<String>,
+    /// The shares' codes were taken off the link service because relays were turned off, and
+    /// none has been registered since. Saves sending those removals on every start.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub links_withdrawn: bool,
 }
 
 /// The secrets that guard one share.
@@ -464,6 +476,8 @@ mod size_probe {
             }],
             downloads: Vec::new(),
             access: BTreeMap::new(),
+            link_removals: Vec::new(),
+            links_withdrawn: false,
         };
         let dir = tempfile::tempdir().unwrap();
         let lists = FileLists::new(dir.path().join("shares"));

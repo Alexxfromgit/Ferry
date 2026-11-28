@@ -6,14 +6,17 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex, OnceLock, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
 
 use anyhow::Context;
 use futures_buffered::BufferedStreamExt;
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, endpoint::presets, protocol::Router};
+use iroh::{
+    Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, Watcher, endpoint::presets,
+    protocol::Router,
+};
 use iroh_blobs::{
     BlobFormat, BlobsProtocol, Hash, HashAndFormat,
     api::{
@@ -43,6 +46,7 @@ use crate::{
     events::{ConnectionKind, Event},
     identity,
     link::{FileEntry, ShareLink, ShareToken},
+    links_service::LinkService,
     protocol::{self, OpenRequest, OpenResponse},
     provider::{self, ProviderState},
     registry::{
@@ -223,6 +227,23 @@ struct Inner {
     provider: Arc<ProviderState>,
     /// Limits password guesses per share.
     guesses: GuessLimiter,
+    /// The short-link service, if short links are used.
+    links: Option<LinkService>,
+    /// Short links are off (from the start, or turned off while running): nothing is
+    /// registered or looked up, though codes registered before are still removed.
+    links_off: AtomicBool,
+    /// What the link worker knows about the service (see `link_worker`).
+    link_state: Mutex<link_worker::LinkState>,
+    /// Wakes the link worker when there is something new to do.
+    links_wake: Arc<tokio::sync::Notify>,
+    /// Shutting down: the link worker sends what removals it can, then stops.
+    links_closing: AtomicBool,
+    /// The link worker, while it runs.
+    link_worker: Mutex<Option<AbortOnDropHandle<()>>>,
+    /// Devices can be found without addresses in links (see [`Config::address_book`]).
+    has_address_book: bool,
+    /// Tasks that live as long as the node (the test address book watcher).
+    _background: Vec<AbortOnDropHandle<()>>,
     /// Password checks running at once. Each one is memory-hard (about 19 MiB), so a burst of
     /// guesses from many devices must not run them all together.
     password_checks: Arc<tokio::sync::Semaphore>,
@@ -252,11 +273,14 @@ impl Node {
                 (RelayMode::Default, RelayChoice::Default)
             }
         };
-        let builder = if config.address_lookup {
+        let mut builder = if config.address_lookup {
             Endpoint::builder(presets::N0)
         } else {
             Endpoint::builder(presets::Minimal)
         };
+        if let Some(book) = &config.address_book {
+            builder = builder.address_lookup(book.clone());
+        }
         let endpoint = builder
             .secret_key(secret)
             .relay_mode(relay_mode)
@@ -333,6 +357,25 @@ impl Node {
             &store,
             Some(EventSender::new(provider_tx, provider::EVENT_MASK)),
         );
+        let links = match &config.links_service {
+            Some(base) => match LinkService::new(base, endpoint.tls_config().clone()) {
+                Ok(service) => Some(service),
+                Err(e) => {
+                    tracing::warn!("short links are off: {e:#}");
+                    None
+                }
+            },
+            None => None,
+        };
+        let mut background = Vec::new();
+        if let Some(book) = config.address_book.clone() {
+            let mut addrs = endpoint.watch_addr().stream();
+            background.push(AbortOnDropHandle::new(tokio::spawn(async move {
+                while let Some(addr) = addrs.next().await {
+                    book.add_endpoint_info(addr);
+                }
+            })));
+        }
         let handle = Arc::new(Handle::default());
         let router = Router::builder(endpoint)
             .accept(iroh_blobs::ALPN, blobs)
@@ -375,6 +418,14 @@ impl Node {
                 share_ops: tokio::sync::Mutex::new(()),
                 provider,
                 guesses: GuessLimiter::default(),
+                links,
+                links_off: AtomicBool::new(!config.short_links),
+                link_state: Mutex::default(),
+                links_wake: Arc::default(),
+                links_closing: AtomicBool::new(false),
+                link_worker: Mutex::new(None),
+                has_address_book: config.address_book.is_some(),
+                _background: background,
                 password_checks: Arc::new(tokio::sync::Semaphore::new(PASSWORD_CHECKS)),
                 events,
                 downloads: Mutex::new(HashMap::new()),
@@ -387,6 +438,7 @@ impl Node {
         if migrated || access_changed {
             node.persist();
         }
+        node.start_link_worker();
         for id in resume {
             tracing::info!(%id, "resuming download");
             node.spawn_download(id);
@@ -401,6 +453,11 @@ impl Node {
     /// The relay setting actually in use (an invalid custom relay is replaced by the default).
     pub fn relay(&self) -> &RelayChoice {
         &self.inner.relay
+    }
+
+    /// Whether this node talks to the short-link service (to make short links and open them).
+    pub fn uses_link_service(&self) -> bool {
+        self.link_service().is_some()
     }
 
     /// Wait until the node is reachable through its relay (or the timeout passes).
@@ -454,6 +511,9 @@ impl Node {
     /// Stop serving and close the store. Active downloads resume on the next start.
     pub async fn shutdown(&self) -> anyhow::Result<()> {
         self.inner.downloads.lock().unwrap().clear();
+        // Short links being removed get a moment to reach the service; the rest are saved and
+        // sent on the next start.
+        self.stop_link_worker().await;
         // Shutting down the router also shuts down the blobs protocol and with it the store.
         let router_closed =
             tokio::time::timeout(Duration::from_secs(3), self.inner.router.shutdown())
@@ -469,11 +529,22 @@ impl Node {
 
     // ---------------------------------------------------------------- shares
 
+    /// Without relays (and outside tests), a recipient can only find this device through
+    /// addresses in the link.
+    fn links_need_addresses(&self) -> bool {
+        matches!(self.inner.relay, RelayChoice::Disabled) && !self.inner.has_address_book
+    }
+
+    /// Whether shares get short links (once the link service has accepted them).
+    pub fn short_links_on(&self) -> bool {
+        self.uses_link_service() && !self.links_need_addresses()
+    }
+
     /// The full link of a share. It carries this device's addresses only when no relays are
     /// used, since a recipient could not find the device otherwise.
     fn link_for(&self, token: ShareToken) -> ShareLink {
         let id = self.endpoint().id();
-        if matches!(self.inner.relay, RelayChoice::Disabled) {
+        if self.links_need_addresses() {
             let addr = self.endpoint().addr();
             let addrs: Vec<_> = addr.ip_addrs().copied().collect();
             ShareLink::with_addrs(id, token, &addrs)
@@ -494,8 +565,12 @@ impl Node {
             .cloned();
         if let Some(access) = access {
             let link = self.link_for(access.token);
-            share.link = link.to_url();
             share.code = link.code();
+            share.link = if self.short_links_on() && self.has_short_link(&share.id) {
+                ShareLink::Code(share.code.clone()).to_url()
+            } else {
+                link.to_url()
+            };
             share.locked = access.password.is_some();
         }
         share
@@ -785,6 +860,7 @@ impl Node {
         self.emit(Event::ShareCreated {
             share: share.clone(),
         });
+        self.schedule_short_link(&share.id);
         Ok(share)
     }
 
@@ -961,10 +1037,15 @@ impl Node {
         let _ops = self.inner.share_ops.lock().await;
         {
             // Serving is stopped under the registry lock, together with the registry change.
+            // The share's short code is queued for removal in the same change, so it is saved
+            // with it and removed even if this run ends first.
             let mut registry = self.inner.registry.lock().unwrap();
             anyhow::ensure!(registry.share(&id).is_some(), "unknown share");
             registry.shares.retain(|s| s.id != id);
-            registry.access.remove(&id);
+            if let Some(access) = registry.access.remove(&id) {
+                let code = crate::link::share_code(&self.endpoint().id(), &access.token);
+                self.forget_short_link(&mut registry, &id, code);
+            }
             self.inner.provider.disallow(&hash);
         }
         self.inner.guesses.reset(&id);
@@ -1034,6 +1115,9 @@ impl Node {
             entry.clone()
         };
         let saved = self.try_persist();
+        if !paused {
+            self.schedule_short_link(&id);
+        }
         let updated = self.with_link(updated);
         self.emit(Event::ShareUpdated {
             share: updated.clone(),
@@ -1063,13 +1147,18 @@ impl Node {
             .context("could not reach the sender (is their Ferry running?)")
     }
 
-    /// The device and token a link names, looking up a short code if needed.
-    async fn resolve(&self, link: &ShareLink) -> anyhow::Result<ShareLink> {
+    /// The device and token a link names, looking up a short code if needed, with the
+    /// sender's home relay if the link service knows it.
+    async fn resolve(&self, link: &ShareLink) -> anyhow::Result<(ShareLink, Option<RelayUrl>)> {
         match link {
-            ShareLink::Direct { .. } => Ok(link.clone()),
-            ShareLink::Code(_) => anyhow::bail!(
-                "this Ferry can't open short links yet; ask the sender for the full link"
-            ),
+            ShareLink::Direct { .. } => Ok((link.clone(), None)),
+            ShareLink::Code(code) => {
+                let service = self.link_service().context(
+                    "short links are turned off on this device; ask the sender for the full link",
+                )?;
+                let found = service.resolve(code).await?;
+                Ok((ShareLink::direct(found.endpoint, found.token), found.relay))
+            }
         }
     }
 
@@ -1078,6 +1167,7 @@ impl Node {
     async fn open_share(
         &self,
         link: &ShareLink,
+        relay: Option<RelayUrl>,
         password: Option<String>,
     ) -> anyhow::Result<(Hash, EndpointAddr)> {
         let ShareLink::Direct {
@@ -1090,7 +1180,11 @@ impl Node {
         };
         let addr = EndpointAddr::from_parts(
             *endpoint,
-            addrs.iter().copied().map(iroh::TransportAddr::Ip),
+            addrs
+                .iter()
+                .copied()
+                .map(iroh::TransportAddr::Ip)
+                .chain(relay.map(iroh::TransportAddr::Relay)),
         );
         let conn = self.connect(addr.clone(), protocol::ALPN).await?;
         let answer = protocol::open(
@@ -1164,8 +1258,8 @@ impl Node {
         link: &ShareLink,
         password: Option<String>,
     ) -> anyhow::Result<Preview> {
-        let link = self.resolve(link).await?;
-        let (hash, addr) = self.open_share(&link, password).await?;
+        let (link, relay) = self.resolve(link).await?;
+        let (hash, addr) = self.open_share(&link, relay, password).await?;
         let conn = self.connect(addr, iroh_blobs::ALPN).await?;
         let connection = selected_path(&conn);
         let index = self.fetch_index(&conn, hash).await;
@@ -1210,8 +1304,9 @@ impl Node {
     ) -> anyhow::Result<DownloadInfo> {
         // Saving needs an absolute path; resolve it now, not after the whole transfer.
         let dest_dir = std::path::absolute(&dest_dir).context("invalid destination folder")?;
-        let link = self.resolve(link).await?;
-        let (hash, _) = self.open_share(&link, password).await?;
+        // The download keeps the full link, so resuming needs no lookup.
+        let (link, relay) = self.resolve(link).await?;
+        let (hash, _) = self.open_share(&link, relay.clone(), password).await?;
         let id = hash.to_hex().to_string();
         if self.is_running(&id) {
             return self
@@ -1229,6 +1324,7 @@ impl Node {
         let info = DownloadInfo {
             id: id.clone(),
             link: link.to_url(),
+            relay: relay.as_ref().map(|r| r.to_string()),
             dest_dir,
             name: String::new(),
             status: DownloadStatus::Connecting,
@@ -1415,7 +1511,11 @@ impl Node {
                 "this download was started by an older version of Ferry; open the link again"
             );
             let link = ShareLink::parse(&info.link)?;
-            let (served, addr) = self.open_share(&link, None).await.map_err(|e| {
+            let relay = info
+                .relay
+                .as_deref()
+                .and_then(|r| r.parse::<RelayUrl>().ok());
+            let (served, addr) = self.open_share(&link, relay, None).await.map_err(|e| {
                 if e.downcast_ref::<AccessError>().is_some() {
                     // A new password is the usual reason, but a sender also remembers only so
                     // many devices per locked share (`MAX_SAVED_GRANTS`), so don't claim which.
@@ -1683,12 +1783,15 @@ fn dunce_canonicalize(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(canonical)
 }
 
+mod link_worker;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     mod access;
     mod resume;
+    mod short_links;
 
     #[test]
     fn display_name_counts_distinct_top_levels() {
