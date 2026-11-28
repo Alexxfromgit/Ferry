@@ -224,7 +224,7 @@ impl ProviderState {
             .insert(device);
     }
 
-    fn is_granted(&self, hash: &Hash, device: &EndpointId) -> bool {
+    pub(crate) fn is_granted(&self, hash: &Hash, device: &EndpointId) -> bool {
         self.grants
             .read()
             .unwrap()

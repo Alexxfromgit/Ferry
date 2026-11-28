@@ -188,10 +188,7 @@ mod windows_private {
     pub(super) fn access_list(path: &Path) -> io::Result<String> {
         use windows_sys::Win32::Security::{
             ACL,
-            Authorization::{
-                ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
-                SE_FILE_OBJECT,
-            },
+            Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT},
             DACL_SECURITY_INFORMATION,
         };
         let path = wide(path.as_os_str());
@@ -212,16 +209,57 @@ mod windows_private {
             if status != 0 {
                 return Err(io::Error::from_raw_os_error(status as i32));
             }
+            let text = dacl_text(sd);
+            LocalFree(sd);
+            text
+        }
+    }
+
+    /// `sddl` as Windows writes it back: well-known accounts by their aliases (the built-in
+    /// administrator as `LA`, say), so access lists can be compared whoever runs the test.
+    #[cfg(test)]
+    pub(super) fn canonical(sddl: &str) -> io::Result<String> {
+        let sddl = wide(OsStr::new(sddl));
+        // SAFETY: the descriptor is made and freed here.
+        unsafe {
+            let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                ptr::null_mut(),
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let text = dacl_text(sd);
+            LocalFree(sd);
+            text
+        }
+    }
+
+    /// The access list of a security descriptor, in SDDL.
+    ///
+    /// # Safety
+    /// `sd` must be a valid security descriptor.
+    #[cfg(test)]
+    unsafe fn dacl_text(sd: PSECURITY_DESCRIPTOR) -> io::Result<String> {
+        use windows_sys::Win32::Security::{
+            Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW,
+            DACL_SECURITY_INFORMATION,
+        };
+        // SAFETY: the caller promises a valid descriptor; the text is freed by
+        // `take_local_string`.
+        unsafe {
             let mut text: *mut u16 = ptr::null_mut();
-            let ok = ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            if ConvertSecurityDescriptorToStringSecurityDescriptorW(
                 sd,
                 SDDL_REVISION_1,
                 DACL_SECURITY_INFORMATION,
                 &mut text,
                 ptr::null_mut(),
-            );
-            LocalFree(sd);
-            if ok == 0 {
+            ) == 0
+            {
                 return Err(io::Error::last_os_error());
             }
             Ok(take_local_string(text))
@@ -489,6 +527,20 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
+    /// What tripped the first version of the test above on CI: an account Windows has an
+    /// alias for comes back as the alias.
+    #[cfg(windows)]
+    #[test]
+    fn access_lists_are_compared_as_windows_writes_them() {
+        assert_eq!(
+            windows_private::canonical("D:P(A;;FA;;;S-1-5-32-544)(A;;FA;;;S-1-5-18)").unwrap(),
+            "D:P(A;;FA;;;BA)(A;;FA;;;SY)"
+        );
+        let mine = windows_private::descriptor().unwrap();
+        let once = windows_private::canonical(&mine).unwrap();
+        assert_eq!(windows_private::canonical(&once).unwrap(), once);
+    }
+
     #[test]
     fn private_files_are_for_the_current_user_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -507,12 +559,18 @@ mod tests {
         }
         #[cfg(windows)]
         {
+            // Compared as Windows writes them: it names some accounts by alias (the built-in
+            // administrator, which CI runs as, is `LA`), whatever SID went in.
+            let expected = windows_private::descriptor().unwrap();
             let acl = windows_private::access_list(&path).unwrap();
             assert_eq!(
                 acl,
-                windows_private::descriptor().unwrap(),
+                windows_private::canonical(&expected).unwrap(),
                 "nothing else, nothing inherited"
             );
+            assert!(acl.starts_with("D:P("), "protected from inheritance: {acl}");
+            assert_eq!(acl.matches("(A;;FA;;;").count(), 2, "{acl}");
+            assert!(acl.contains("(A;;FA;;;SY)"), "{acl}");
         }
     }
 }

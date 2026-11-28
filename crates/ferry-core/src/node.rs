@@ -1777,6 +1777,7 @@ mod link_worker;
 mod tests {
     use super::*;
 
+    mod access;
     mod resume;
     mod short_links;
 
