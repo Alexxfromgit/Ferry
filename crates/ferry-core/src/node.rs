@@ -1406,6 +1406,13 @@ impl Node {
         else {
             anyhow::bail!("this link must be looked up first");
         };
+        // Only a sender without relays puts addresses in its links, and a device hiding its IP
+        // address has no direct connections to reach those with.
+        anyhow::ensure!(
+            !(self.inner.hide_ip && !addrs.is_empty() && relay.is_none()),
+            "the sender uses no relays, so this device can't reach them while it hides its IP \
+             address; turn off Hide my IP address to open this link"
+        );
         let addr = EndpointAddr::from_parts(
             *endpoint,
             addrs

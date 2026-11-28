@@ -161,3 +161,27 @@ async fn hiding_needs_relays() {
         .to_string();
     assert!(err.contains("needs relays"), "{err}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hidden_receiver_says_why_it_cant_open_a_link_without_relays() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let (_relay, url) = relay().await;
+    let setup = Setup {
+        relay: url,
+        book: MemoryLookup::new(),
+    };
+    // A sender without relays, whose links carry its addresses.
+    let sender = Node::start(Config::local_only(tmp.path().join("sender")))
+        .await
+        .unwrap();
+    let receiver = setup.node(&tmp.path().join("receiver"), true, true).await;
+    let (file, _) = sample(tmp.path());
+    let share = sender.create_share(vec![file]).await.unwrap();
+    let link = ShareLink::parse(&share.link).unwrap();
+    let err = receiver.preview(&link, None).await.unwrap_err().to_string();
+    assert!(err.contains("uses no relays"), "{err}");
+
+    sender.shutdown().await.unwrap();
+    receiver.shutdown().await.unwrap();
+}
