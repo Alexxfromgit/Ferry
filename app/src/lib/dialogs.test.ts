@@ -2,7 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const calls: string[] = [];
-let panel = false;
+let mobile = false;
 let dialogResult: () => Promise<unknown>;
 
 vi.mock("@tauri-apps/plugin-dialog", () => {
@@ -19,13 +19,13 @@ vi.mock("./api", () => ({
     },
   },
 }));
-vi.mock("./store.svelte", () => ({ isPanel: () => panel }));
+vi.mock("./store.svelte", () => ({ isMobile: () => mobile }));
 
 const dialogs = await import("./dialogs");
 
 beforeEach(() => {
   calls.length = 0;
-  panel = true;
+  mobile = false;
   dialogResult = async () => "C:\\picked";
 });
 
@@ -45,8 +45,8 @@ describe("native dialogs in the tray panel", () => {
     expect(calls).toEqual(["hold", "open", "release"]);
   });
 
-  it("leave a regular window alone", async () => {
-    panel = false;
+  it("leave a phone alone", async () => {
+    mobile = true;
     await dialogs.open();
     expect(calls).toEqual(["open"]);
   });

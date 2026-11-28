@@ -29,9 +29,13 @@
     { id: "fit", label: "Fit to screen height", hint: "As tall as the space above the taskbar allows." },
   ] as const;
 
+  /** The settings as last saved, so a save that fails can put the controls back. */
+  let saved: Settings | null = null;
+
   onMount(() => {
     api.getSettings().then((s) => {
       settings = s;
+      saved = s;
       relayMode = s.relay.mode;
       relayUrl = s.relay.mode === "custom" ? s.relay.url : "";
     });
@@ -47,10 +51,14 @@
     try {
       restartNeeded = await api.setSettings(next);
       settings = next;
+      saved = next;
       app.showArtwork = next.showArtwork;
       if (app.info) app.panel = isPanelStyle(app.info, next.windowStyle);
       toast("Settings saved");
     } catch (err) {
+      // The controls changed before the save; show what Ferry still uses. The relay fields
+      // keep what was typed, so it can be corrected.
+      if (saved) settings = { ...saved };
       toast(message(err), true);
     }
   }

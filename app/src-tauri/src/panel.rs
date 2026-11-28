@@ -123,6 +123,12 @@ impl Panel {
         toggle
     }
 
+    /// A left press on the tray icon: a double-click that never got its release (the pointer
+    /// slid off the icon) is over, so this click is an ordinary one.
+    fn left_pressed(&self) {
+        self.double_click.store(false, Ordering::SeqCst);
+    }
+
     /// Windows reports a double-click's second press as a double click; the click that
     /// follows it changes nothing.
     fn double_clicked(&self) {
@@ -248,7 +254,7 @@ pub fn on_tray_event(app: &AppHandle, event: &TrayIconEvent) {
             button: MouseButton::Left,
             button_state: MouseButtonState::Down,
             ..
-        } => {}
+        } => panel.left_pressed(),
         TrayIconEvent::DoubleClick {
             button: MouseButton::Left,
             ..
@@ -320,15 +326,34 @@ pub fn reset(app: &AppHandle) {
     }
 }
 
+/// Nothing keeps the panel open any more (unpinned, or its last dialog closed): if the focus
+/// moved elsewhere meanwhile, it hides now, as it would have on losing the focus.
+fn hide_if_left(window: &Window, panel: &Panel) {
+    if window.label() == "main"
+        && current(window.app_handle()).is_some()
+        && !panel.stays_open()
+        && window.is_visible().unwrap_or(false)
+        && !window.is_focused().unwrap_or(true)
+    {
+        window.hide().ok();
+    }
+}
+
 #[tauri::command]
-pub fn set_panel_pinned(panel: State<'_, Panel>, pinned: bool) {
+pub fn set_panel_pinned(window: Window, panel: State<'_, Panel>, pinned: bool) {
     panel.pinned.store(pinned, Ordering::SeqCst);
+    if !pinned {
+        hide_if_left(&window, &panel);
+    }
 }
 
 /// The UI opens (`held`) or closes a native dialog, during which the panel stays.
 #[tauri::command]
-pub fn panel_hold(panel: State<'_, Panel>, held: bool) {
+pub fn panel_hold(window: Window, panel: State<'_, Panel>, held: bool) {
     panel.hold(held);
+    if !held {
+        hide_if_left(&window, &panel);
+    }
 }
 
 /// Escape in the UI: puts the panel away. A regular window stays.
@@ -619,6 +644,11 @@ mod tests {
         assert_eq!(panel.left_clicked(false, Instant::now()), Toggle::Nothing);
         // The click after a double-click is an ordinary one again.
         assert_eq!(panel.left_clicked(false, Instant::now()), Toggle::Show);
+        // A double-click whose release never came (the pointer slid off the icon) doesn't
+        // swallow the next click.
+        panel.double_clicked();
+        panel.left_pressed();
+        assert_eq!(panel.left_clicked(true, Instant::now()), Toggle::Hide);
     }
 
     #[test]

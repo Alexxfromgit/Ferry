@@ -1,13 +1,14 @@
 // Native dialogs, held open in the tray panel. A dialog takes focus from the panel, which would
 // hide it (and with it the dialog's owner) the moment the dialog appears; while one is up the
-// panel stays.
+// panel stays. Every desktop dialog holds, so it can't depend on the page knowing it's a panel:
+// a regular window ignores the hold.
 
 import * as dialog from "@tauri-apps/plugin-dialog";
 import { api } from "./api";
-import { isPanel } from "./store.svelte";
+import { isMobile } from "./store.svelte";
 
 async function held<T>(show: () => Promise<T>): Promise<T> {
-  if (!isPanel()) return show();
+  if (isMobile()) return show();
   await api.panelHold(true).catch(() => {});
   try {
     return await show();
