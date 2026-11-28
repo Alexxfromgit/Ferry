@@ -57,6 +57,9 @@ pub(super) struct LinkState {
     pub(in crate::node) due: HashMap<String, Due>,
     /// After a failed removal: when to try again, and how long that wait was.
     removal_retry: Option<(Instant, Duration)>,
+    /// When each request was sent (tests check the pacing on these).
+    #[cfg(test)]
+    pub(in crate::node) sent: Vec<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -425,7 +428,10 @@ async fn run(node: Weak<Inner>, wake: std::sync::Arc<tokio::sync::Notify>) {
                         continue;
                     }
                 }
-                last_request = Some(Instant::now());
+                let now = Instant::now();
+                last_request = Some(now);
+                #[cfg(test)]
+                node_now.inner.link_state.lock().unwrap().sent.push(now);
                 match job {
                     Job::Remove(code) => node_now.send_removal(code).await,
                     Job::Register(id) => node_now.send_registration(id).await,
