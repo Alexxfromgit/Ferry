@@ -155,6 +155,8 @@ export function installDevPreview() {
         case "set_settings":
           Object.assign(settings, (args as { settings: typeof settings }).settings);
           return false;
+        case "restart_needed":
+          return false;
         case "app_info":
           return mobile
             ? { platform: "android", mobile: true, distribution: "direct" }

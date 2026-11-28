@@ -17,11 +17,13 @@
   let settings = $state<Settings | null>(null);
   let relayMode = $state<"default" | "custom" | "disabled">("default");
   let relayUrl = $state("");
-  /** True while the saved relay differs from the one Ferry is running with. */
+  /** True while the saved connection settings differ from the ones Ferry is running with. Asked
+   * from the running node, so leaving Settings and coming back keeps the warning. */
   let restartNeeded = $state(false);
   const canUpdate = $derived(updatable(updates.info));
 
   onMount(() => {
+    api.restartNeeded().then((needed) => (restartNeeded = needed), () => {});
     api.getSettings().then((s) => {
       settings = s;
       relayMode = s.relay.mode;

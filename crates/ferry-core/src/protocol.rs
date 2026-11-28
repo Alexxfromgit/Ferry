@@ -89,6 +89,29 @@ pub fn is_lan_ip(ip: std::net::IpAddr, loopback: bool) -> bool {
     }
 }
 
+/// The local networks of this device that are worth offering: the private IPv4 networks of
+/// its interfaces that are up (see [`is_lan_ip`]), and with `loopback` also 127.0.0.0/8.
+pub async fn lan_networks(loopback: bool) -> Vec<ipnet::Ipv4Net> {
+    let state = netwatch::interfaces::State::new().await;
+    let mut nets: Vec<ipnet::Ipv4Net> = state
+        .interfaces
+        .values()
+        .filter(|iface| iface.is_up())
+        .flat_map(|iface| iface.addrs())
+        .filter_map(|net| match net {
+            netwatch::interfaces::IpNet::V4(net) => Some(net),
+            netwatch::interfaces::IpNet::V6 { .. } => None,
+        })
+        .filter(|net| is_lan_ip(net.addr().into(), loopback))
+        .collect();
+    if loopback && !nets.iter().any(|net| net.addr().is_loopback()) {
+        nets.push(ipnet::Ipv4Net::new(std::net::Ipv4Addr::LOCALHOST, 8).expect("valid prefix"));
+    }
+    nets.sort();
+    nets.dedup();
+    nets
+}
+
 /// What the sender does with requests.
 pub trait Handler: Send + Sync + 'static {
     fn open(
@@ -194,5 +217,15 @@ mod tests {
             assert!(!lan(not_local, false), "{not_local}");
         }
         assert!(lan("127.0.0.1", true), "loopback only in tests");
+    }
+
+    #[tokio::test]
+    async fn local_networks_are_the_private_ones_of_this_device() {
+        for net in lan_networks(false).await {
+            assert!(is_lan_ip(net.addr().into(), false), "{net}");
+            assert!(net.prefix_len() > 0, "{net}: a network, not everything");
+        }
+        let with_loopback = lan_networks(true).await;
+        assert!(with_loopback.iter().any(|net| net.addr().is_loopback()));
     }
 }

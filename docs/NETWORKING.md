@@ -83,7 +83,11 @@ and with it roughly where you are. `ferry --hide-ip` does the same on the comman
 
 Devices on your own network still connect directly, because there's nothing to hide from them:
 they already share your public address. For that, Ferry runs a second, separate endpoint that
-has no relay and never learns a public address. Once a recipient has the share's token (and
+has no relay and never learns a public address. It listens only on your device's private IPv4
+networks, and only ever sends to addresses inside them, never through a router, which would
+put your public address on what it sends. It takes those networks as they are when Ferry
+starts; after switching networks, local transfers go through the relay until Ferry restarts.
+Once a recipient has the share's token (and
 password), your Ferry tells it that endpoint's local addresses (such as `192.168.1.20`). If the
 recipient is on the same network, it connects there directly within a couple of seconds;
 otherwise it carries on through the relay. Local addresses say nothing about where you are, and

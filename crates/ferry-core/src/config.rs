@@ -84,6 +84,10 @@ pub struct Config {
     /// Try local-network connections at all (tests turn this off to force the relay).
     #[doc(hidden)]
     pub lan_direct: bool,
+    /// Offer these local addresses instead of the real ones (tests: an address that never
+    /// answers, to check the fallback to the relay).
+    #[doc(hidden)]
+    pub lan_offer: Option<Vec<std::net::SocketAddr>>,
 }
 
 impl Config {
@@ -99,6 +103,7 @@ impl Config {
             hide_ip: false,
             lan_loopback: false,
             lan_direct: true,
+            lan_offer: None,
         }
     }
 
@@ -115,6 +120,7 @@ impl Config {
             hide_ip: false,
             lan_loopback: true,
             lan_direct: true,
+            lan_offer: None,
         }
     }
 }

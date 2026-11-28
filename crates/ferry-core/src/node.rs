@@ -218,6 +218,11 @@ struct Inner {
     lan_router: Option<Router>,
     hide_ip: bool,
     lan_loopback: bool,
+    /// While hiding the IP address: the local networks the local endpoint is bound to. It
+    /// only ever reaches addresses inside them, never through a router.
+    lan_nets: Vec<ipnet::Ipv4Net>,
+    /// See [`Config::lan_offer`].
+    lan_offer: Option<Vec<std::net::SocketAddr>>,
     lan_direct: bool,
     store: FsStore,
     relay: RelayChoice,
@@ -392,15 +397,39 @@ impl Node {
             .accept(protocol::ALPN, protocol::Protocol::new(handle.clone()))
             .spawn();
         let mut lan_rx = None;
+        let lan_nets = if config.hide_ip {
+            protocol::lan_networks(config.lan_loopback).await
+        } else {
+            Vec::new()
+        };
         let lan_router = if config.hide_ip {
-            let lan_endpoint = Endpoint::builder(presets::Minimal)
+            let mut builder = Endpoint::builder(presets::Minimal)
                 .secret_key(identity::load_or_create_secret(&data_dir.join("lan.key"))?)
                 .relay_mode(RelayMode::Disabled)
                 .clear_relay_transports()
-                .clear_ip_transports()
-                // IPv4 only: local IPv6 addresses are usually global ones.
-                .bind_addr("0.0.0.0:0")
-                .map_err(|e| anyhow::anyhow!("{e}"))?
+                .clear_ip_transports();
+            // One socket per local network, with that network's prefix and no default route:
+            // it neither listens on public interfaces nor sends anything through a router,
+            // where the router would put this device's public address on it. IPv4 only, since
+            // local IPv6 addresses are usually global ones. Without a local network, only
+            // loopback, which is never offered outside tests.
+            let binds = if lan_nets.is_empty() {
+                vec![ipnet::Ipv4Net::new(std::net::Ipv4Addr::LOCALHOST, 8).expect("valid prefix")]
+            } else {
+                lan_nets.clone()
+            };
+            for net in binds {
+                builder = builder
+                    .bind_addr_with_opts(
+                        std::net::SocketAddr::new(net.addr().into(), 0),
+                        iroh::endpoint::BindOpts::default()
+                            .set_prefix_len(net.prefix_len())
+                            .set_is_default_route(false)
+                            .set_is_required(false),
+                    )
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            }
+            let lan_endpoint = builder
                 .portmapper_config(iroh::endpoint::PortmapperConfig::Disabled)
                 .alpns(vec![iroh_blobs::ALPN.to_vec(), protocol::ALPN.to_vec()])
                 .bind()
@@ -458,6 +487,8 @@ impl Node {
                 lan_router,
                 hide_ip: config.hide_ip,
                 lan_loopback: config.lan_loopback,
+                lan_nets,
+                lan_offer: config.lan_offer.clone(),
                 lan_direct: config.lan_direct,
                 store,
                 relay,
@@ -522,13 +553,16 @@ impl Node {
     /// Where recipients on the same local network can reach this device directly.
     fn lan_offer(&self) -> Option<LanAddr> {
         let endpoint = self.lan_endpoint();
-        let addrs: Vec<_> = endpoint
-            .addr()
-            .ip_addrs()
-            .filter(|a| protocol::is_lan_ip(a.ip(), self.inner.lan_loopback))
-            .copied()
-            .take(MAX_LAN_ADDRS)
-            .collect();
+        let addrs: Vec<_> = match &self.inner.lan_offer {
+            Some(addrs) => addrs.clone(),
+            None => endpoint
+                .addr()
+                .ip_addrs()
+                .filter(|a| protocol::is_lan_ip(a.ip(), self.inner.lan_loopback))
+                .copied()
+                .take(MAX_LAN_ADDRS)
+                .collect(),
+        };
         (!addrs.is_empty()).then(|| LanAddr {
             id: endpoint.id(),
             addrs,
@@ -1266,22 +1300,28 @@ impl Node {
         else {
             anyhow::bail!("this link must be looked up first");
         };
-        // Only a sender without relays puts addresses in its links, and a device hiding its IP
-        // address has no direct connections to reach those with.
-        anyhow::ensure!(
-            !(self.inner.hide_ip && !addrs.is_empty() && relay.is_none()),
-            "the sender uses no relays, so this device can't reach them while it hides its IP \
-             address; turn off Hide my IP address to open this link"
-        );
+        // A device hiding its IP address makes no direct connections, so it ignores the
+        // addresses in a link and looks for the sender's relay instead: the sender had no
+        // relays when it made the link, but may use them now.
+        let ips: &[std::net::SocketAddr] = if self.inner.hide_ip { &[] } else { addrs };
         let addr = EndpointAddr::from_parts(
             *endpoint,
-            addrs
-                .iter()
+            ips.iter()
                 .copied()
                 .map(iroh::TransportAddr::Ip)
                 .chain(relay.map(iroh::TransportAddr::Relay)),
         );
-        let conn = self.connect(addr.clone(), protocol::ALPN).await?;
+        let conn = match self.connect(addr.clone(), protocol::ALPN).await {
+            Ok(conn) => conn,
+            Err(e) if self.inner.hide_ip && !addrs.is_empty() => {
+                return Err(e.context(
+                    "the sender used no relays when they made this link, and this device can't \
+                     reach them directly while it hides its IP address. Ask them to turn relays \
+                     on, or turn off Hide my IP address to open it",
+                ));
+            }
+            Err(e) => return Err(e),
+        };
         let answer = protocol::open(
             &conn,
             OpenRequest {
@@ -1337,6 +1377,49 @@ impl Node {
         self.connect(sender.clone(), iroh_blobs::ALPN).await
     }
 
+    /// Where to reach an offered local endpoint: its local addresses only and, while hiding
+    /// the IP address, only those on one of this device's own local networks. Anything else
+    /// would go through a router, which would show this device's public address.
+    fn lan_target(&self, lan: &LanAddr) -> Option<EndpointAddr> {
+        let hiding = self.inner.lan_router.is_some();
+        let addrs: Vec<_> = lan
+            .addrs
+            .iter()
+            .filter(|a| protocol::is_lan_ip(a.ip(), self.inner.lan_loopback))
+            .filter(|a| {
+                let std::net::IpAddr::V4(ip) = a.ip() else {
+                    return false;
+                };
+                !hiding || self.inner.lan_nets.iter().any(|net| net.contains(&ip))
+            })
+            .copied()
+            .take(MAX_LAN_ADDRS)
+            .map(iroh::TransportAddr::Ip)
+            .collect();
+        (!addrs.is_empty()).then(|| EndpointAddr::from_parts(lan.id, addrs))
+    }
+
+    /// Ask the sender's local endpoint for the share, which lets this device's local identity
+    /// fetch it there.
+    async fn lan_open(
+        &self,
+        addr: &EndpointAddr,
+        hash: Hash,
+        token: ShareToken,
+        password: Option<String>,
+    ) -> anyhow::Result<()> {
+        let conn = self
+            .lan_endpoint()
+            .connect(addr.clone(), protocol::ALPN)
+            .await?;
+        let answer = protocol::open(&conn, OpenRequest { token, password }).await;
+        conn.close(0u32.into(), b"done");
+        match answer? {
+            OpenResponse::Ok { hash: served, .. } if served == hash => Ok(()),
+            other => anyhow::bail!("the local endpoint answered {other:?}"),
+        }
+    }
+
     async fn lan_connection(
         &self,
         lan: &LanAddr,
@@ -1344,23 +1427,11 @@ impl Node {
         token: ShareToken,
         password: Option<String>,
     ) -> anyhow::Result<iroh::endpoint::Connection> {
-        let dialer = self.lan_endpoint();
-        let addrs = lan
-            .addrs
-            .iter()
-            .filter(|a| protocol::is_lan_ip(a.ip(), self.inner.lan_loopback))
-            .copied()
-            .take(MAX_LAN_ADDRS)
-            .map(iroh::TransportAddr::Ip);
-        let addr = EndpointAddr::from_parts(lan.id, addrs);
-        let conn = dialer.connect(addr.clone(), protocol::ALPN).await?;
-        let answer = protocol::open(&conn, OpenRequest { token, password }).await;
-        conn.close(0u32.into(), b"done");
-        match answer? {
-            OpenResponse::Ok { hash: served, .. } if served == hash => {}
-            other => anyhow::bail!("the local endpoint answered {other:?}"),
-        }
-        Ok(dialer.connect(addr, iroh_blobs::ALPN).await?)
+        let addr = self
+            .lan_target(lan)
+            .context("the sender's local addresses aren't on this device's networks")?;
+        self.lan_open(&addr, hash, token, password).await?;
+        Ok(self.lan_endpoint().connect(addr, iroh_blobs::ALPN).await?)
     }
 
     /// Fetch and check a share's index (file names and sizes) without any file data.
@@ -1461,7 +1532,25 @@ impl Node {
         let dest_dir = std::path::absolute(&dest_dir).context("invalid destination folder")?;
         // The download keeps the full link, so resuming needs no lookup.
         let (link, relay) = self.resolve(link).await?;
-        let (hash, _, _) = self.open_share(&link, relay.clone(), password).await?;
+        let (hash, _, lan) = self
+            .open_share(&link, relay.clone(), password.clone())
+            .await?;
+        // While hiding the IP address, the transfer may run between the local endpoints, which
+        // the sender sees as another device. Let that one in now too, while the password is at
+        // hand: the download itself doesn't keep it.
+        if password.is_some()
+            && self.inner.lan_direct
+            && self.inner.lan_router.is_some()
+            && let Some(target) = lan.as_ref().and_then(|lan| self.lan_target(lan))
+        {
+            let token = link_token(&link)?;
+            let attempt =
+                tokio::time::timeout(LAN_TIMEOUT, self.lan_open(&target, hash, token, password))
+                    .await;
+            if !matches!(attempt, Ok(Ok(()))) {
+                tracing::debug!("the sender's local endpoint didn't let this device in");
+            }
+        }
         let id = hash.to_hex().to_string();
         if self.is_running(&id) {
             return self
