@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0](https://github.com/Alexxfromgit/Ferry/compare/v0.3.0...v0.4.0) (2026-11-28)
+
+
+### Features
+
+* add a branded startup splash on Android and desktop ([#26](https://github.com/Alexxfromgit/Ferry/issues/26)) ([abbe61b](https://github.com/Alexxfromgit/Ferry/commit/abbe61bcc785d7426e998b254550481e276222af))
+* lock shares with passwords and keep IP addresses out of links ([#25](https://github.com/Alexxfromgit/Ferry/issues/25)) ([0857b01](https://github.com/Alexxfromgit/Ferry/commit/0857b01154645ad4055be1fea0a49898e1099207))
+
+
+### Dependencies
+
+* bump anyhow from 1.0.104 to 1.0.105 ([#32](https://github.com/Alexxfromgit/Ferry/issues/32)) ([5ae2af0](https://github.com/Alexxfromgit/Ferry/commit/5ae2af0e2b81fd1d4c91d13a49a69f589e14e38e))
+* bump clap from 4.6.7 to 4.6.9 ([#36](https://github.com/Alexxfromgit/Ferry/issues/36)) ([28854bc](https://github.com/Alexxfromgit/Ferry/commit/28854bcf42005b0081842388b5cd7267e7b4ac8e))
+
 ## [0.3.0](https://github.com/Alexxfromgit/Ferry/compare/v0.2.0...v0.3.0) (2026-11-15)
 
 

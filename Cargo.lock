@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1688,7 +1688,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-desktop"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "ferry-core",
@@ -6465,7 +6465,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-ferry-mobile"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",

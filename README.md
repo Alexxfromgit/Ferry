@@ -16,14 +16,14 @@ Windows, macOS, Linux and Android.
 
 <!-- x-release-please-start-version -->
 
-Latest version: **0.2.0** · [Release notes](https://github.com/Alexxfromgit/Ferry/releases/tag/v0.2.0) · [All releases](https://github.com/Alexxfromgit/Ferry/releases)
+Latest version: **0.4.0** · [Release notes](https://github.com/Alexxfromgit/Ferry/releases/tag/v0.2.0) · [All releases](https://github.com/Alexxfromgit/Ferry/releases)
 
 | Platform | Download | Also available |
 | --- | --- | --- |
-| Windows x64 | [Installer (.exe)](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-windows-x64.exe) | [.msi](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-windows-x64.msi) |
-| macOS, Apple silicon | [Disk image (.dmg)](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-macos-arm64.dmg) | [.pkg](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-macos-arm64.pkg) |
-| macOS, Intel | [Disk image (.dmg)](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-macos-x64.dmg) | [.pkg](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-macos-x64.pkg) |
-| Linux x64 | [AppImage](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-linux-x64.AppImage) | [.deb](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-linux-x64.deb) |
+| Windows x64 | [Installer (.exe)](https://github.com/Alexxfromgit/Ferry/releases/download/v0.4.0/Ferry-0.2.0-windows-x64.exe) | [.msi](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-windows-x64.msi) |
+| macOS, Apple silicon | [Disk image (.dmg)](https://github.com/Alexxfromgit/Ferry/releases/download/v0.4.0/Ferry-0.2.0-macos-arm64.dmg) | [.pkg](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-macos-arm64.pkg) |
+| macOS, Intel | [Disk image (.dmg)](https://github.com/Alexxfromgit/Ferry/releases/download/v0.4.0/Ferry-0.2.0-macos-x64.dmg) | [.pkg](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-macos-x64.pkg) |
+| Linux x64 | [AppImage](https://github.com/Alexxfromgit/Ferry/releases/download/v0.4.0/Ferry-0.2.0-linux-x64.AppImage) | [.deb](https://github.com/Alexxfromgit/Ferry/releases/download/v0.2.0/Ferry-0.2.0-linux-x64.deb) |
 | Android 10+ | [APK from ferry.xenvaultinteractive.com](https://ferry.xenvaultinteractive.com/android) | |
 
 <!-- x-release-please-end -->
