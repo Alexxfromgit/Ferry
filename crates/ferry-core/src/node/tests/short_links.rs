@@ -234,13 +234,22 @@ async fn removals_are_kept_until_the_service_has_them_even_across_restarts() {
         mock.links.lock().unwrap().is_empty()
     })
     .await;
-    wait_until("the removal is no longer saved", || {
-        !std::fs::read_to_string(dir.join("registry.json"))
+    // Checked in the node, not by reading its file while it runs: on Windows an open reader
+    // makes the node's next save fail.
+    wait_until("the removal is no longer pending", || {
+        sender
+            .inner
+            .registry
+            .lock()
             .unwrap()
-            .contains(&share.code)
+            .link_removals
+            .is_empty()
     })
     .await;
     sender.shutdown().await.unwrap();
+    drop(sender);
+    let saved = std::fs::read_to_string(dir.join("registry.json")).unwrap();
+    assert!(!saved.contains(&share.code), "and no longer saved");
 }
 
 #[tokio::test(flavor = "multi_thread")]
