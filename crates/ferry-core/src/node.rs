@@ -935,12 +935,12 @@ impl Node {
                 .access
                 .entry(share.id.clone())
                 .or_insert_with(ShareAccess::generate);
-            let grants: Vec<EndpointId> = access
-                .grants
-                .iter()
-                .filter_map(|d| parse_device(d))
-                .collect();
-            self.inner.provider.set_grants(hash, grants);
+            // Added to the devices let in already, not put in their place: sharing the same
+            // files again must not end the downloads of an open share's recipients, whose
+            // grants are kept only in memory.
+            for device in access.grants.iter().filter_map(|d| parse_device(d)) {
+                self.inner.provider.grant(hash, device);
+            }
             self.inner.provider.allow(
                 hash,
                 share.total_size,
