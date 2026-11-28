@@ -15,6 +15,11 @@ pub fn load_or_create_secret(path: &Path) -> anyhow::Result<SecretKey> {
         let bytes: [u8; 32] = bytes
             .try_into()
             .map_err(|_| anyhow::anyhow!("secret key file must contain 32 bytes"))?;
+        // Keys written by Ferry 0.3 and earlier may be readable by others on Windows. Only
+        // after the key was read in full, and with the same contents, so it can't be lost.
+        if let Err(e) = crate::util::make_private(path, text.as_bytes()) {
+            tracing::warn!("could not make {} private: {e:#}", path.display());
+        }
         return Ok(SecretKey::from_bytes(&bytes));
     }
     let key = SecretKey::generate();
@@ -28,6 +33,27 @@ pub fn load_or_create_secret(path: &Path) -> anyhow::Result<SecretKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_written_before_become_private_and_stay_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.key");
+        let key = SecretKey::generate();
+        // As an older Ferry wrote it: readable by others.
+        crate::util::write_atomic(&path, hex::encode(key.to_bytes()).as_bytes()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let loaded = load_or_create_secret(&path).unwrap();
+        assert_eq!(loaded.public(), key.public(), "the same key");
+        assert!(
+            !crate::util::make_private(&path, &std::fs::read(&path).unwrap()).unwrap(),
+            "already private after loading"
+        );
+        assert_eq!(load_or_create_secret(&path).unwrap().public(), key.public());
+    }
 
     #[test]
     fn key_is_stable_across_loads() {

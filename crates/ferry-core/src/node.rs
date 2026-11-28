@@ -302,6 +302,13 @@ impl Node {
 
         let registry_path = data_dir.join("registry.json");
         let (mut registry, legacy_lists) = Registry::load(&registry_path)?;
+        // It holds share tokens and password hashes; one written before it was kept private
+        // (by an older Ferry, or copied in) is made private now, with the same contents.
+        if let Ok(saved) = std::fs::read(&registry_path)
+            && let Err(e) = util::make_private(&registry_path, &saved)
+        {
+            tracing::warn!("could not make the registry private: {e:#}");
+        }
         let file_lists = FileLists::new(data_dir.join("shares"));
         // Registries from earlier versions kept every file list inline; move them out.
         let migrated = !legacy_lists.is_empty();
@@ -1510,7 +1517,12 @@ impl Node {
                 .and_then(|r| r.parse::<RelayUrl>().ok());
             let (served, addr) = self.open_share(&link, relay, None).await.map_err(|e| {
                 if e.downcast_ref::<AccessError>().is_some() {
-                    e.context("the sender changed the share's password; open the link again")
+                    // A new password is the usual reason, but a sender also remembers only so
+                    // many devices per locked share (`MAX_SAVED_GRANTS`), so don't claim which.
+                    e.context(
+                        "the sender asks for the share's password again (they may have changed \
+                         it); open the link again and enter it",
+                    )
                 } else {
                     e
                 }
