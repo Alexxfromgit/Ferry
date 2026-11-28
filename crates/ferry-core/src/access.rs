@@ -14,12 +14,19 @@ use iroh::EndpointId;
 
 /// The shortest password a share accepts, not counting spaces at either end.
 pub const MIN_PASSWORD_CHARS: usize = 4;
+/// The longest password a share accepts, in UTF-8 bytes. Recipients send it in one `ferry/1`
+/// request, which must stay under that protocol's size limit (checked there).
+pub const MAX_PASSWORD_BYTES: usize = 1024;
 
 /// Whether `password` is acceptable for a share, with a message saying why not.
 pub fn check_password(password: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
         password.trim().chars().count() >= MIN_PASSWORD_CHARS,
         "Use a password of at least {MIN_PASSWORD_CHARS} characters"
+    );
+    anyhow::ensure!(
+        password.len() <= MAX_PASSWORD_BYTES,
+        "Use a shorter password (at most {MAX_PASSWORD_BYTES} bytes)"
     );
     Ok(())
 }
@@ -209,6 +216,19 @@ mod tests {
             "spaces alone are not a password"
         );
         assert!(hash_password("  ab  ").is_err());
+        assert!(check_password(&"x".repeat(MAX_PASSWORD_BYTES)).is_ok());
+        assert!(
+            check_password(&"x".repeat(MAX_PASSWORD_BYTES + 1)).is_err(),
+            "too long to send to the sender"
+        );
+        // Counted in bytes, as they are sent: 342 three-byte characters are too many.
+        assert!(check_password(&"\u{20ac}".repeat(342)).is_err());
+        let longest = crate::protocol::OpenRequest {
+            token: crate::link::ShareToken::generate(),
+            password: Some("\u{20ac}".repeat(MAX_PASSWORD_BYTES / 3)),
+        };
+        let bytes = postcard::to_stdvec(&crate::protocol::Request::Open(longest)).unwrap();
+        assert!(bytes.len() <= 4 * 1024, "{} bytes", bytes.len());
         assert!(verify_password("not a hash", "x").is_err());
     }
 

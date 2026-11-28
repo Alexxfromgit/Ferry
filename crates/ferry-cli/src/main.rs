@@ -159,22 +159,10 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                     }
                 }
             });
-            let mut share = node.create_share(paths).await?;
+            // The password is set as the share is made, so it is never served without it.
+            let mut share = node.create_share_with_password(paths, password).await?;
             progress.abort();
             eprintln!();
-            if let Some(password) = &password {
-                match node
-                    .set_share_password(&share.id, Some(password.clone()))
-                    .await
-                {
-                    Ok(locked) => share = locked,
-                    Err(e) => {
-                        // Never leave the share open when it was meant to be locked.
-                        node.remove_share(&share.id).await.ok();
-                        return Err(e.context("the share was not locked, so it was removed"));
-                    }
-                }
-            }
             println!(
                 "sharing \"{}\": {} file(s), {}",
                 share.name,

@@ -12,8 +12,11 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> anyhow::Result<()> {
     write_atomic_inner(path, data, false)
 }
 
-/// Like [`write_atomic`], but the file is readable only by the current user (Unix: 0600).
-/// Used for the node's secret key.
+/// Like [`write_atomic`], but the file is readable only by the current user (Unix: 0600;
+/// Windows: an access list for the current user and the system alone, not inherited from the
+/// folder). The file has these permissions from the moment it is created, before anything is
+/// written to it. Used for the node's secret keys and the registry, which holds share tokens
+/// and password hashes.
 pub fn write_atomic_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
     write_atomic_inner(path, data, true)
 }
@@ -31,11 +34,19 @@ fn write_atomic_inner(path: &Path, data: &[u8], private: bool) -> anyhow::Result
         let mode = if private { 0o600 } else { 0o666 };
         options.permissions(std::fs::Permissions::from_mode(mode));
     }
-    #[cfg(not(unix))]
-    let _ = private;
+    #[cfg(windows)]
+    let mut file = if private {
+        options.make_in(dir, windows_private::create)
+    } else {
+        options.tempfile_in(dir)
+    }
+    .with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(not(windows))]
     let mut file = options
         .tempfile_in(dir)
         .with_context(|| format!("writing {}", path.display()))?;
+    #[cfg(not(any(unix, windows)))]
+    let _ = private;
     file.write_all(data)?;
     file.as_file().sync_all()?;
     file.into_temp_path()
@@ -46,6 +57,176 @@ fn write_atomic_inner(path: &Path, data: &[u8], private: bool) -> anyhow::Result
         dir.sync_all().ok();
     }
     Ok(())
+}
+
+/// Files only the current user (and the system) can open, on Windows.
+#[cfg(windows)]
+mod windows_private {
+    use std::{
+        ffi::OsStr,
+        fs::File,
+        io,
+        os::windows::{ffi::OsStrExt, io::FromRawHandle},
+        path::Path,
+        ptr,
+    };
+
+    use windows_sys::Win32::{
+        Foundation::{
+            CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+        },
+        Security::{
+            Authorization::{
+                ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                SDDL_REVISION_1,
+            },
+            GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+            TOKEN_USER, TokenUser,
+        },
+        Storage::FileSystem::{
+            CREATE_NEW, CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE,
+        },
+        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    };
+
+    fn wide(text: &OsStr) -> Vec<u16> {
+        text.encode_wide().chain(Some(0)).collect()
+    }
+
+    /// A NUL-terminated UTF-16 string from Windows, freed with `LocalFree`.
+    ///
+    /// # Safety
+    /// `text` must point to a NUL-terminated string allocated with `LocalAlloc`.
+    unsafe fn take_local_string(text: *mut u16) -> String {
+        // SAFETY: the caller promises a NUL-terminated LocalAlloc'd string.
+        unsafe {
+            let len = (0..).take_while(|&i| *text.add(i) != 0).count();
+            let value = String::from_utf16_lossy(std::slice::from_raw_parts(text, len));
+            LocalFree(text.cast());
+            value
+        }
+    }
+
+    /// The current user's SID, as text (`S-1-5-21-…`).
+    fn current_user_sid() -> io::Result<String> {
+        // SAFETY: plain Win32 calls; every buffer is sized as the API asks, and every handle
+        // and allocation is released before returning.
+        unsafe {
+            let mut token: HANDLE = ptr::null_mut();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut len = 0u32;
+            GetTokenInformation(token, TokenUser, ptr::null_mut(), 0, &mut len);
+            // u64s, so the buffer is aligned for TOKEN_USER.
+            let mut buffer = vec![0u64; (len as usize).div_ceil(8).max(1)];
+            let ok =
+                GetTokenInformation(token, TokenUser, buffer.as_mut_ptr().cast(), len, &mut len);
+            let error = io::Error::last_os_error();
+            CloseHandle(token);
+            if ok == 0 {
+                return Err(error);
+            }
+            let user = &*(buffer.as_ptr() as *const TOKEN_USER);
+            let mut text: *mut u16 = ptr::null_mut();
+            if ConvertSidToStringSidW(user.User.Sid, &mut text) == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(take_local_string(text))
+        }
+    }
+
+    /// The access list of private files: full access for the current user and the system,
+    /// nothing for anyone else, and nothing inherited from the folder (`P`).
+    pub(super) fn descriptor() -> io::Result<String> {
+        Ok(format!("D:P(A;;FA;;;{})(A;;FA;;;SY)", current_user_sid()?))
+    }
+
+    /// Create a new file at `path` with the private access list already in place.
+    pub(super) fn create(path: &Path) -> io::Result<File> {
+        let sddl = wide(OsStr::new(&descriptor()?));
+        let path = wide(path.as_os_str());
+        // SAFETY: the descriptor is made and freed here; the handle CreateFileW returns is
+        // owned by the `File` from then on.
+        unsafe {
+            let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+            if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                ptr::null_mut(),
+            ) == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: sd,
+                bInheritHandle: 0,
+            };
+            let handle = CreateFileW(
+                path.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE | DELETE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                &attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                ptr::null_mut(),
+            );
+            let error = io::Error::last_os_error();
+            LocalFree(sd);
+            if handle == INVALID_HANDLE_VALUE {
+                return Err(error);
+            }
+            Ok(File::from_raw_handle(handle))
+        }
+    }
+
+    /// The access list of a file, in SDDL.
+    #[cfg(test)]
+    pub(super) fn access_list(path: &Path) -> io::Result<String> {
+        use windows_sys::Win32::Security::{
+            ACL,
+            Authorization::{
+                ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
+                SE_FILE_OBJECT,
+            },
+            DACL_SECURITY_INFORMATION,
+        };
+        let path = wide(path.as_os_str());
+        // SAFETY: as above; the descriptor and the text are freed before returning.
+        unsafe {
+            let mut dacl: *mut ACL = ptr::null_mut();
+            let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+            let status = GetNamedSecurityInfoW(
+                path.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut sd,
+            );
+            if status != 0 {
+                return Err(io::Error::from_raw_os_error(status as i32));
+            }
+            let mut text: *mut u16 = ptr::null_mut();
+            let ok = ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                sd,
+                SDDL_REVISION_1,
+                DACL_SECURITY_INFORMATION,
+                &mut text,
+                ptr::null_mut(),
+            );
+            LocalFree(sd);
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(take_local_string(text))
+        }
+    }
 }
 
 /// Convert a relative path into a `/`-separated collection entry name.
@@ -306,5 +487,32 @@ mod tests {
         write_atomic(&path, b"two").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"two");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn private_files_are_for_the_current_user_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        // Replacing a file that others could read leaves one that they can't.
+        write_atomic(&path, b"open").unwrap();
+        write_atomic_private(&path, b"secret").unwrap();
+        write_atomic_private(&path, b"secret again").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"secret again");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        #[cfg(windows)]
+        {
+            let acl = windows_private::access_list(&path).unwrap();
+            assert_eq!(
+                acl,
+                windows_private::descriptor().unwrap(),
+                "nothing else, nothing inherited"
+            );
+        }
     }
 }

@@ -248,12 +248,26 @@ describe("checking links", () => {
 
   it("explains unreachable senders differently from bad links", async () => {
     const { receive, checkLink } = await freshStore();
-    backend.preview = () => Promise.reject("could not reach the sender (is their Ferry running?)");
-    await checkLink("ferry://s#x");
-    expect(receive.problem?.title).toMatch(/reach/);
-    backend.preview = () => Promise.reject("this is not a Ferry link");
-    await checkLink("garbage");
-    expect(receive.problem?.title).toMatch(/isn't a Ferry link/);
+    for (const unreachable of [
+      "could not reach the sender (is their Ferry running?)",
+      "the sender isn't sharing this right now: they turned sharing off or removed it",
+      "could not talk to the sender: connection lost",
+      "the sender did not answer: deadline has elapsed",
+    ]) {
+      backend.preview = () => Promise.reject(unreachable);
+      await checkLink("ferry://s#x");
+      expect(receive.problem?.title, unreachable).toMatch(/reach/);
+    }
+    for (const bad of [
+      "this is not a Ferry link",
+      "this link is damaged",
+      "this link is incomplete",
+      "this link was made by a newer version of Ferry; please update Ferry",
+    ]) {
+      backend.preview = () => Promise.reject(bad);
+      await checkLink("garbage");
+      expect(receive.problem?.title, bad).toMatch(/isn't a Ferry link/);
+    }
   });
 
   it("opens links handed over from outside on the Receive screen", async () => {

@@ -136,11 +136,12 @@
     event.preventDefault();
     const values = new FormData(event.currentTarget);
     const password = values.get("password");
+    const repeated = values.get("confirmation");
     if (typeof password !== "string" || !password.trim()) {
       passwordProblem = "Enter a password.";
     } else if ([...password.trim()].length < MIN_PASSWORD) {
       passwordProblem = `Use at least ${MIN_PASSWORD} characters.`;
-    } else if (password !== values.get("confirmation")) {
+    } else if (password !== repeated) {
       passwordProblem = "Passwords do not match.";
     } else {
       void setPassword(password);

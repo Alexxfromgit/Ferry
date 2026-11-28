@@ -299,13 +299,15 @@ export async function checkLink(text: string, password?: string) {
   } catch (err) {
     if (token !== checkToken) return;
     const detail = message(err);
-    const unreachable = /reach|refused|no longer has|transfer/i.test(detail);
-    receive.problem = unreachable
-      ? {
+    // Only reading the link itself can show it's no Ferry link (see `ShareLink::parse`); every
+    // other failure is about reaching the sender or the share.
+    const badLink = /not a Ferry link|link is damaged|link is incomplete|newer version of Ferry/i.test(detail);
+    receive.problem = badLink
+      ? { title: "This isn't a Ferry link Ferry can open.", detail }
+      : {
           title: "Couldn't reach this share.",
           detail: `${detail}. The sender's Ferry has to be running. If it is, ask them whether they stopped sharing it.`,
-        }
-      : { title: "This isn't a Ferry link Ferry can open.", detail };
+        };
   } finally {
     if (token === checkToken) receive.checking = false;
   }
