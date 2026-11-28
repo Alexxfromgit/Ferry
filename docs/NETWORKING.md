@@ -25,10 +25,12 @@ Ferry is built on [iroh](https://iroh.computer) (QUIC connections dialed by publ
 
 1. The ticket contains the sender's addresses at the time the link was made.
 2. Addresses change, for example when a laptop moves to another Wi-Fi or a router gets a new IP.
-   So Ferry also publishes `device ID → current addresses` to n0's DNS service (pkarr) and looks
-   it up when dialing. Old links keep working as long as the sender's device ID stays the same.
-3. The record includes the sender's **home relay** when available. The recipient can use it
-   if both devices can reach the relay.
+   So Ferry also publishes `device ID → home relay` to n0's DNS service (pkarr) and looks it up
+   when dialing. The record holds only the relay's address, never the device's IP addresses.
+3. The recipient reaches the sender through that relay, and the two devices then try to switch
+   to a direct connection. Old links keep working as long as the sender's device ID stays the
+   same and relays are on; with **No relays**, they work only while the addresses in the ticket
+   are current.
 
 ## Direct vs. relay
 
@@ -82,9 +84,15 @@ use `https://that-name` in Ferry. Use an `iroh-relay` version matching the iroh 
   files are never deleted.
 - **A ticket contains your addresses.** Besides the device ID, a link includes the sender's
   current IP addresses (local network and public) and home relay, so whoever sees the link
-  learns them. Your device ID and addresses are also published to n0's public DNS service so
-  links keep working when your IP changes; the files themselves and what you share are not
-  published anywhere.
+  learns them. Your device ID and home relay are also published to n0's public DNS service so
+  links keep working when your IP changes; your IP addresses, the files themselves and what you
+  share are not published anywhere.
+- **Transfers are private, not anonymous.** While connecting, the two devices exchange their
+  addresses to try a direct connection, so the sender's device can learn the recipient's IP
+  address as well, even when the download ends up going through a relay. Ferry doesn't show
+  or log it, but network tools on that device can see it. The relay in use sees both devices'
+  IP addresses and how much data passes, though not the data itself. To hide your IP address,
+  use a VPN; the ticket then carries the VPN's address instead.
 - **Discovery uses n0's DNS service.** If it's unreachable, links still work while the sender's
   addresses in the ticket are current.
 - **Downloads need free space twice, briefly.** Received data first goes into Ferry's own

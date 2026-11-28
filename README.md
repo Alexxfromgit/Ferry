@@ -55,9 +55,9 @@ Every release lists its checksums in `SHA256SUMS.txt` and carries GitHub build a
    they finish.
 
 Treat tickets like passwords. Anyone with an active ticket can request the share, and the
-ticket includes the sender's device ID and network addresses. Ferry also publishes device
-address records through iroh's public discovery service so tickets keep working when a device
-changes networks. Turn sharing off to stop access. [How Ferry connects](docs/NETWORKING.md)
+ticket includes the sender's device ID and IP addresses. Ferry also publishes each device's
+home relay (not its IP addresses) through iroh's public discovery service so tickets keep
+working when a device changes networks. Turn sharing off to stop access. [How Ferry connects](docs/NETWORKING.md)
 
 ## Platforms
 
