@@ -37,12 +37,30 @@ impl Setup {
         config.hide_ip = hide_ip;
         config.lan_direct = lan_direct;
         let node = Node::start(config).await.unwrap();
-        assert!(
-            node.wait_online(Duration::from_secs(30)).await,
-            "the node never reached the test relay"
-        );
+        ready(&node, &self.book).await;
         node
     }
+}
+
+/// Wait until `node` is on the test relay and the shared address book says so: the book
+/// learns it a moment after the node does, and a peer looking it up before then would find
+/// no way to reach it.
+async fn ready(node: &Node, book: &MemoryLookup) {
+    assert!(
+        node.wait_online(Duration::from_secs(30)).await,
+        "the node never reached the test relay"
+    );
+    let id = node.endpoint().id();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !book
+            .get_endpoint_info(id)
+            .is_some_and(|info| info.into_endpoint_addr().relay_urls().next().is_some())
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the address book never learned the node's relay");
 }
 
 async fn wait_for_end(node: &Node, id: &str) -> ferry_core::DownloadInfo {
@@ -215,7 +233,7 @@ async fn a_local_network_that_doesnt_answer_falls_back_to_the_relay() {
     config.hide_ip = true;
     config.lan_offer = Some(vec![silent.local_addr().unwrap()]);
     let sender = Node::start(config).await.unwrap();
-    assert!(sender.wait_online(Duration::from_secs(30)).await);
+    ready(&sender, &setup.book).await;
     // A receiver that does try the local network.
     let receiver = setup.node(&tmp.path().join("receiver"), false, true).await;
 

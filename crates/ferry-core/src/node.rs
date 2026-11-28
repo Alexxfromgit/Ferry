@@ -71,7 +71,9 @@ const IMPORT_PARALLELISM: usize = 4;
 pub const PREVIEW_FILES: usize = 200;
 /// Password checks that may run at once (see `Inner::password_checks`).
 const PASSWORD_CHECKS: usize = 2;
-/// How long a direct connection on the local network may take before the relay is used.
+/// How long reaching the sender on the local network may take before the relay is used. It
+/// bounds only the connection: asking for the share there may take longer, for a password
+/// check (which has its own time limit, see `protocol`).
 const LAN_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn share_tag(hash: &Hash) -> String {
@@ -1363,15 +1365,9 @@ impl Node {
             // Without hiding, the main endpoints find a direct path to each other anyway.
             && (self.inner.lan_router.is_some() || lan.id != sender.id)
         {
-            let attempt = tokio::time::timeout(
-                LAN_TIMEOUT,
-                self.lan_connection(&lan, hash, token, password),
-            )
-            .await;
-            match attempt {
-                Ok(Ok(conn)) => return Ok(conn),
-                Ok(Err(e)) => tracing::debug!("no direct local connection: {e:#}"),
-                Err(_) => tracing::debug!("the sender is not on this local network"),
+            match self.lan_connection(&lan, hash, token, password).await {
+                Ok(conn) => return Ok(conn),
+                Err(e) => tracing::debug!("no direct local connection: {e:#}"),
             }
         }
         self.connect(sender.clone(), iroh_blobs::ALPN).await
@@ -1408,10 +1404,7 @@ impl Node {
         token: ShareToken,
         password: Option<String>,
     ) -> anyhow::Result<()> {
-        let conn = self
-            .lan_endpoint()
-            .connect(addr.clone(), protocol::ALPN)
-            .await?;
+        let conn = self.lan_connect(addr, protocol::ALPN).await?;
         let answer = protocol::open(&conn, OpenRequest { token, password }).await;
         conn.close(0u32.into(), b"done");
         match answer? {
@@ -1431,7 +1424,20 @@ impl Node {
             .lan_target(lan)
             .context("the sender's local addresses aren't on this device's networks")?;
         self.lan_open(&addr, hash, token, password).await?;
-        Ok(self.lan_endpoint().connect(addr, iroh_blobs::ALPN).await?)
+        self.lan_connect(&addr, iroh_blobs::ALPN).await
+    }
+
+    /// Connect to a local endpoint, giving up after [`LAN_TIMEOUT`]: one that is there
+    /// answers within milliseconds.
+    async fn lan_connect(
+        &self,
+        addr: &EndpointAddr,
+        alpn: &[u8],
+    ) -> anyhow::Result<iroh::endpoint::Connection> {
+        tokio::time::timeout(LAN_TIMEOUT, self.lan_endpoint().connect(addr.clone(), alpn))
+            .await
+            .context("the sender is not on this local network")?
+            .context("could not connect on the local network")
     }
 
     /// Fetch and check a share's index (file names and sizes) without any file data.
@@ -1544,11 +1550,8 @@ impl Node {
             && let Some(target) = lan.as_ref().and_then(|lan| self.lan_target(lan))
         {
             let token = link_token(&link)?;
-            let attempt =
-                tokio::time::timeout(LAN_TIMEOUT, self.lan_open(&target, hash, token, password))
-                    .await;
-            if !matches!(attempt, Ok(Ok(()))) {
-                tracing::debug!("the sender's local endpoint didn't let this device in");
+            if let Err(e) = self.lan_open(&target, hash, token, password).await {
+                tracing::debug!("the sender's local endpoint didn't let this device in: {e:#}");
             }
         }
         let id = hash.to_hex().to_string();
