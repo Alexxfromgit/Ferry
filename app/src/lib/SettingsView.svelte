@@ -171,7 +171,12 @@
         </span>
       </label>
       <label class="check">
-        <input type="checkbox" bind:checked={settings.shortLinks} onchange={persist} />
+        <input
+          type="checkbox"
+          bind:checked={settings.shortLinks}
+          disabled={relayMode === "disabled"}
+          onchange={persist}
+        />
         <span>
           Short links
           <span class="muted hint">

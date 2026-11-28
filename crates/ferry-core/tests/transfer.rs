@@ -287,6 +287,43 @@ async fn removing_a_share_ends_a_running_transfer() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sharing_the_same_files_again_keeps_running_downloads() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("movie.bin");
+    let data = content(128 * 1024 * 1024, 9);
+    std::fs::write(&file, &data).unwrap();
+    let sender = node(&tmp.path().join("sender")).await;
+    let receiver = node(&tmp.path().join("receiver")).await;
+    let share = sender.create_share(vec![file.clone()]).await.unwrap();
+    let link = ShareLink::parse(&share.link).unwrap();
+
+    let mut events = receiver.subscribe();
+    let started = receiver
+        .start_download(&link, None, tmp.path().join("dl"))
+        .await
+        .unwrap();
+    wait_for_partial(&mut events, &started.id).await;
+    let again = sender.create_share(vec![file]).await.unwrap();
+    assert_eq!(again.link, share.link, "the share keeps its link");
+    assert_ne!(
+        receiver.download(&started.id).unwrap().status,
+        DownloadStatus::Completed,
+        "transfer finished too quickly to test"
+    );
+
+    let done = wait_for_end(&receiver, &started.id).await;
+    assert_eq!(done.status, DownloadStatus::Completed, "{:?}", done.error);
+    assert_eq!(
+        std::fs::read(tmp.path().join("dl/movie.bin")).unwrap(),
+        data
+    );
+
+    sender.shutdown().await.unwrap();
+    receiver.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_share_turned_off_is_refused_until_turned_on_again() {
     init_tracing();
     let tmp = tempfile::tempdir().unwrap();

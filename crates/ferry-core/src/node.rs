@@ -6,7 +6,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex, OnceLock, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -243,6 +243,8 @@ struct Inner {
     guesses: GuessLimiter,
     /// The short-link service, if short links are used.
     links: Option<LinkService>,
+    /// Short links were turned off while running: the service is no longer contacted.
+    links_off: AtomicBool,
     /// Shares whose short code the link service knows, so their link can be the short one.
     short_links: Mutex<HashSet<String>>,
     /// Devices can be found without addresses in links (see [`Config::address_book`]).
@@ -465,6 +467,7 @@ impl Node {
                 provider,
                 guesses: GuessLimiter::default(),
                 links,
+                links_off: AtomicBool::new(false),
                 short_links: Mutex::new(HashSet::new()),
                 has_address_book: config.address_book.is_some(),
                 background: Mutex::new(background),
@@ -536,7 +539,15 @@ impl Node {
 
     /// Whether this node talks to the short-link service (to make short links and open them).
     pub fn uses_link_service(&self) -> bool {
-        self.inner.links.is_some()
+        self.link_service().is_some()
+    }
+
+    /// The short-link service, unless short links are off.
+    fn link_service(&self) -> Option<&LinkService> {
+        self.inner
+            .links
+            .as_ref()
+            .filter(|_| !self.inner.links_off.load(Ordering::SeqCst))
     }
 
     /// Wait until the node is reachable through its relay (or the timeout passes).
@@ -623,7 +634,7 @@ impl Node {
 
     /// Whether shares get short links (once the link service has accepted them).
     pub fn short_links_on(&self) -> bool {
-        self.inner.links.is_some() && !self.links_need_addresses()
+        self.uses_link_service() && !self.links_need_addresses()
     }
 
     /// The full link of a share. It carries this device's addresses only when no relays are
@@ -681,7 +692,7 @@ impl Node {
     }
 
     async fn try_register_short_link(&self, id: &str) -> anyhow::Result<()> {
-        let Some(service) = &self.inner.links else {
+        let Some(service) = self.link_service() else {
             return Ok(());
         };
         let token = {
@@ -704,10 +715,11 @@ impl Node {
         // The share may have been removed while this was under way, and its code removed from
         // the service before it arrived there. Checked and marked under the registry lock, which
         // a removal also takes: either the removal comes after this and removes the code again,
-        // or this sees it and does so.
+        // or this sees it and does so. Turning short links off works the same way.
         let newly = {
             let registry = self.inner.registry.lock().unwrap();
-            let still_shared = registry.access.get(id).is_some_and(|a| a.token == token);
+            let still_shared = registry.access.get(id).is_some_and(|a| a.token == token)
+                && !self.inner.links_off.load(Ordering::SeqCst);
             if still_shared {
                 Some(
                     self.inner
@@ -732,32 +744,69 @@ impl Node {
         Ok(())
     }
 
-    /// Remove every short link this device registered, for when short links are turned off.
-    /// Waits for the service (a few seconds at most per link).
-    pub async fn remove_short_links(&self) {
+    /// Turn short links off or back on while running. Off: shares show their full links again,
+    /// nothing more is sent to the link service or looked up there, and the codes it has are
+    /// removed in the background (paced; shutting down gives them a few seconds). On again:
+    /// the shares are registered again. A node started without a link service can't turn them
+    /// on; that needs a restart.
+    pub fn set_short_links(&self, on: bool) {
         let Some(service) = self.inner.links.clone() else {
             return;
         };
-        let tokens: Vec<ShareToken> = self
-            .inner
-            .registry
-            .lock()
-            .unwrap()
-            .access
-            .values()
-            .map(|a| a.token)
-            .collect();
-        self.inner.short_links.lock().unwrap().clear();
-        let secret = self.endpoint().secret_key().clone();
-        for (i, token) in tokens.into_iter().enumerate() {
-            if i > 0 {
-                tokio::time::sleep(LINK_PACE).await;
-            }
-            let code = crate::link::share_code(&secret.public(), &token);
-            if let Err(e) = service.delete(&secret, &code, util::now_unix()).await {
-                tracing::warn!("could not remove a short link: {e:#}");
-            }
+        if self.inner.links_off.swap(!on, Ordering::SeqCst) == !on {
+            return;
         }
+        let node = Arc::downgrade(&self.inner);
+        let task = if on {
+            let ids: Vec<String> = {
+                let registry = self.inner.registry.lock().unwrap();
+                registry
+                    .shares
+                    .iter()
+                    .filter(|s| !s.paused)
+                    .map(|s| s.id.clone())
+                    .collect()
+            };
+            tokio::spawn(async move {
+                for (i, id) in ids.into_iter().enumerate() {
+                    if i > 0 {
+                        tokio::time::sleep(LINK_PACE).await;
+                    }
+                    let Some(inner) = node.upgrade() else { return };
+                    let node = Node { inner };
+                    if let Err(e) = node.try_register_short_link(&id).await {
+                        tracing::warn!(%id, "could not register a short link: {e:#}");
+                    }
+                }
+            })
+        } else {
+            // Taken under the registry lock after the switch, so a registration finishing now
+            // either sees the switch and removes its own code, or is cleared here.
+            let (tokens, shown) = {
+                let registry = self.inner.registry.lock().unwrap();
+                let shown = std::mem::take(&mut *self.inner.short_links.lock().unwrap());
+                let tokens: Vec<ShareToken> = registry.access.values().map(|a| a.token).collect();
+                (tokens, shown)
+            };
+            for id in shown {
+                if let Some(share) = self.share(&id) {
+                    self.emit(Event::ShareUpdated { share });
+                }
+            }
+            let secret = self.endpoint().secret_key().clone();
+            tokio::spawn(async move {
+                for (i, token) in tokens.into_iter().enumerate() {
+                    if i > 0 {
+                        tokio::time::sleep(LINK_PACE).await;
+                    }
+                    let code = crate::link::share_code(&secret.public(), &token);
+                    if let Err(e) = service.delete(&secret, &code, util::now_unix()).await {
+                        tracing::warn!("could not remove a short link: {e:#}");
+                    }
+                }
+            })
+        };
+        self.add_link_job(task);
     }
 
     fn add_link_job(&self, task: tokio::task::JoinHandle<()>) {
@@ -774,7 +823,7 @@ impl Node {
         if !self.short_links_on() {
             return;
         }
-        let Some(service) = self.inner.links.clone() else {
+        let Some(service) = self.link_service().cloned() else {
             return;
         };
         let secret = self.endpoint().secret_key().clone();
@@ -1027,12 +1076,12 @@ impl Node {
                 .access
                 .entry(share.id.clone())
                 .or_insert_with(ShareAccess::generate);
-            let grants: Vec<EndpointId> = access
-                .grants
-                .iter()
-                .filter_map(|d| parse_device(d))
-                .collect();
-            self.inner.provider.set_grants(hash, grants);
+            // Added to the devices let in already, not put in their place: sharing the same
+            // files again must not end the downloads of an open share's recipients, whose
+            // grants are kept only in memory.
+            for device in access.grants.iter().filter_map(|d| parse_device(d)) {
+                self.inner.provider.grant(hash, device);
+            }
             self.inner.provider.allow(
                 hash,
                 share.total_size,
@@ -1332,8 +1381,8 @@ impl Node {
         match link {
             ShareLink::Direct { .. } => Ok((link.clone(), None)),
             ShareLink::Code(code) => {
-                let service = self.inner.links.as_ref().context(
-                    "short links are turned off in Settings; ask the sender for the full link",
+                let service = self.link_service().context(
+                    "short links are turned off on this device; ask the sender for the full link",
                 )?;
                 let found = service.resolve(code).await?;
                 Ok((ShareLink::direct(found.endpoint, found.token), found.relay))
