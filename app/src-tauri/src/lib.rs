@@ -346,14 +346,14 @@ fn set_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult
         settings.download_dir = saved.download_dir.clone();
     }
     save_settings(&state.settings_path, &settings)?;
+    // Short links switch at once: off also takes the existing ones off the link service. Only
+    // turning them on in a run started without them needs a restart.
+    {
+        let _runtime = tauri::async_runtime::handle().inner().enter();
+        state.node.set_short_links(settings.short_links);
+    }
     let restart = settings.relay != *state.node.relay()
         || settings.short_links != state.node.uses_link_service();
-    // Turning short links off also takes the existing ones off the link service, while this
-    // run still talks to it.
-    if saved.short_links && !settings.short_links {
-        let node = state.node.clone();
-        tauri::async_runtime::spawn(async move { node.remove_short_links().await });
-    }
     *saved = settings;
     Ok(restart)
 }

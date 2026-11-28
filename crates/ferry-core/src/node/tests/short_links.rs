@@ -114,10 +114,46 @@ async fn turning_short_links_off_removes_them() {
     .await
     .expect("both short links were registered");
 
-    sender.remove_short_links().await;
-    assert!(mock.links.lock().unwrap().is_empty());
+    let wait_for = |count: usize| {
+        let mock = mock.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(60), async {
+                while mock.links.lock().unwrap().len() != count {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("the service never had {count} links"));
+        }
+    };
+
+    sender.set_short_links(false);
+    assert!(!sender.uses_link_service());
     for share in sender.list_shares() {
-        assert!(share.link.contains("/s#"), "back to the full link");
+        assert!(share.link.contains("/s#"), "back to the full link at once");
     }
+    wait_for(0).await;
+
+    // Nothing brings them back while short links are off, and short links aren't looked up.
+    let shares = sender.list_shares();
+    sender.set_share_paused(&shares[0].id, true).await.unwrap();
+    sender.set_share_paused(&shares[0].id, false).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(mock.links.lock().unwrap().is_empty());
+    let code = ShareLink::Code(shares[0].code.clone());
+    let err = sender.preview(&code, None).await.unwrap_err().to_string();
+    assert!(err.contains("turned off"), "{err}");
+
+    // Turned on again, the shares get their short links back.
+    sender.set_short_links(true);
+    assert!(sender.uses_link_service());
+    wait_for(2).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !sender.list_shares().iter().all(|s| s.link.contains("/s/")) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the shares show their short links again");
     sender.shutdown().await.unwrap();
 }
