@@ -327,15 +327,18 @@ async fn all_requests_to_the_service_are_paced() {
         links.len() == 2 && !links.contains_key(&shares[0].code)
     })
     .await;
-    let writes = mock.writes.lock().unwrap().clone();
-    assert!(writes.len() >= 3, "{writes:?}");
-    for pair in writes.windows(2) {
+    // Checked on when the worker sent each request, not when the mock got it: how long a
+    // request takes on the way doesn't change the pacing.
+    let sent = sender.inner.link_state.lock().unwrap().sent.clone();
+    assert!(sent.len() >= 3, "{sent:?}");
+    assert_eq!(
+        sent.len(),
+        mock.writes.lock().unwrap().len(),
+        "every write went out paced"
+    );
+    for pair in sent.windows(2) {
         let gap = pair[1] - pair[0];
-        // A little slack for the request on the wire, which the pause is measured from.
-        assert!(
-            gap + Duration::from_millis(20) >= link_worker::LINK_PACE,
-            "{gap:?}"
-        );
+        assert!(gap >= link_worker::LINK_PACE, "{gap:?}");
     }
     sender.shutdown().await.unwrap();
 }
