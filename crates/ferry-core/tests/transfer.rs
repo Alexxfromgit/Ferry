@@ -74,7 +74,10 @@ impl protocol::Handler for OpenToAll {
         _remote: EndpointId,
         _request: protocol::OpenRequest,
     ) -> protocol::OpenResponse {
-        protocol::OpenResponse::Ok { hash: self.0 }
+        protocol::OpenResponse::Ok {
+            hash: self.0,
+            lan: None,
+        }
     }
 }
 

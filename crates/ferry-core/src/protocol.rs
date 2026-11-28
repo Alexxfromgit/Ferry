@@ -49,14 +49,67 @@ impl std::fmt::Debug for OpenRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OpenResponse {
-    /// The device may fetch the share with this root hash.
-    Ok { hash: Hash },
+    /// The device may fetch the share with this root hash. `lan` says where the sender can be
+    /// reached directly on a local network, if it might be (see [`LanAddr`]).
+    Ok { hash: Hash, lan: Option<LanAddr> },
     /// The share is locked and no password was given.
     PasswordRequired,
     /// The password is wrong, or too many guesses were made; try again after the delay.
     WrongPassword { retry_after_secs: u64 },
     /// No such share, or sharing it is turned off.
     Unavailable,
+}
+
+/// Where a sender can be reached on a local network: an endpoint and its local (private)
+/// addresses. Devices elsewhere can't reach those, and they say nothing about where anyone is,
+/// so the sender can hand them to anyone it lets in, even while it hides its IP address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanAddr {
+    pub id: EndpointId,
+    pub addrs: Vec<std::net::SocketAddr>,
+}
+
+/// Local addresses offered at most.
+pub const MAX_LAN_ADDRS: usize = 8;
+
+/// Whether `ip` is a local-network address worth offering: private IPv4 ranges, the shared
+/// carrier and VPN range 100.64/10, and link-local; loopback only when `loopback` is set.
+pub fn is_lan_ip(ip: std::net::IpAddr, loopback: bool) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_private()
+                || v4.is_link_local()
+                || (a == 100 && (64..128).contains(&b))
+                || (loopback && v4.is_loopback())
+        }
+        // Local-network IPv6 addresses are usually global ones, which would give the location
+        // away; only IPv4 is offered.
+        std::net::IpAddr::V6(_) => false,
+    }
+}
+
+/// The local networks of this device that are worth offering: the private IPv4 networks of
+/// its interfaces that are up (see [`is_lan_ip`]), and with `loopback` also 127.0.0.0/8.
+pub async fn lan_networks(loopback: bool) -> Vec<ipnet::Ipv4Net> {
+    let state = netwatch::interfaces::State::new().await;
+    let mut nets: Vec<ipnet::Ipv4Net> = state
+        .interfaces
+        .values()
+        .filter(|iface| iface.is_up())
+        .flat_map(|iface| iface.addrs())
+        .filter_map(|net| match net {
+            netwatch::interfaces::IpNet::V4(net) => Some(net),
+            netwatch::interfaces::IpNet::V6 { .. } => None,
+        })
+        .filter(|net| is_lan_ip(net.addr().into(), loopback))
+        .collect();
+    if loopback && !nets.iter().any(|net| net.addr().is_loopback()) {
+        nets.push(ipnet::Ipv4Net::new(std::net::Ipv4Addr::LOCALHOST, 8).expect("valid prefix"));
+    }
+    nets.sort();
+    nets.dedup();
+    nets
 }
 
 /// What the sender does with requests.
@@ -134,4 +187,45 @@ pub async fn open(connection: &Connection, request: OpenRequest) -> anyhow::Resu
         .context("the sender did not answer")?
         .context("the sender did not answer")?;
     postcard::from_bytes(&bytes).context("the sender's answer is not understood; update Ferry")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_local_addresses_are_offered() {
+        let lan = |ip: &str, loopback| is_lan_ip(ip.parse().unwrap(), loopback);
+        for local in [
+            "192.168.1.20",
+            "10.0.0.5",
+            "172.16.3.4",
+            "169.254.1.1",
+            "100.64.0.1",
+        ] {
+            assert!(lan(local, false), "{local}");
+        }
+        for not_local in [
+            "8.8.8.8",
+            "172.32.0.1",
+            "100.128.0.1",
+            "127.0.0.1",
+            "fe80::1",
+            "fd00::1",
+            "2001:db8::1",
+        ] {
+            assert!(!lan(not_local, false), "{not_local}");
+        }
+        assert!(lan("127.0.0.1", true), "loopback only in tests");
+    }
+
+    #[tokio::test]
+    async fn local_networks_are_the_private_ones_of_this_device() {
+        for net in lan_networks(false).await {
+            assert!(is_lan_ip(net.addr().into(), false), "{net}");
+            assert!(net.prefix_len() > 0, "{net}: a network, not everything");
+        }
+        let with_loopback = lan_networks(true).await;
+        assert!(with_loopback.iter().any(|net| net.addr().is_loopback()));
+    }
 }

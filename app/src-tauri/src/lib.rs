@@ -55,6 +55,10 @@ struct Settings {
     /// Make short links through Ferry's link service (and open them).
     #[serde(default = "yes")]
     short_links: bool,
+    /// Connect to devices elsewhere only through the relay, so they never learn this
+    /// device's IP address.
+    #[serde(default)]
+    hide_ip: bool,
 }
 
 fn default_auto_check_updates() -> bool {
@@ -111,6 +115,7 @@ fn load_settings(path: &Path, default_download_dir: PathBuf) -> Settings {
         auto_check_updates: default_auto_check_updates(),
         show_artwork: true,
         short_links: true,
+        hide_ip: false,
     };
     let Some(mut settings) = std::fs::read(path)
         .ok()
@@ -121,12 +126,22 @@ fn load_settings(path: &Path, default_download_dir: PathBuf) -> Settings {
     if !settings.download_dir.is_absolute() {
         settings.download_dir = defaults.download_dir;
     }
+    // Settings saved by hand could ask to hide the IP address without relays, which can't
+    // work. Privacy wins: the default relays are used, so the address stays hidden.
+    if settings.hide_ip && settings.relay == RelayChoice::Disabled {
+        settings.relay = RelayChoice::Default;
+    }
     settings
 }
 
 /// Settings coming from the UI must be usable, so a typo can't break the next start.
 fn validate_settings(settings: &Settings) -> Result<(), String> {
     settings.relay.validate().map_err(fail)?;
+    if settings.hide_ip && settings.relay == RelayChoice::Disabled {
+        return Err(
+            "Hiding your IP address needs relays. Choose public relays or your own first.".into(),
+        );
+    }
     if !settings.download_dir.is_absolute() {
         return Err("Choose a download folder with a full path.".into());
     }
@@ -335,6 +350,21 @@ fn save_settings(path: &Path, settings: &Settings) -> CmdResult<()> {
     ferry_core::write_atomic(path, &json).map_err(fail)
 }
 
+/// Whether the saved settings differ from what the running node uses, so Ferry has to restart
+/// for them to take effect.
+fn needs_restart(settings: &Settings, node: &Node) -> bool {
+    settings.relay != *node.relay()
+        || settings.short_links != node.uses_link_service()
+        || settings.hide_ip != node.hides_ip()
+}
+
+/// Whether Ferry has to restart for the saved settings to take effect. Asked whenever Settings
+/// opens, so the warning stays until the restart.
+#[tauri::command]
+fn restart_needed(state: State<'_, AppState>) -> bool {
+    needs_restart(&state.settings.lock().unwrap(), &state.node)
+}
+
 /// Save settings. Returns `true` when a restart is needed for them to take effect.
 #[tauri::command]
 fn set_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult<bool> {
@@ -352,8 +382,7 @@ fn set_settings(state: State<'_, AppState>, mut settings: Settings) -> CmdResult
         let _runtime = tauri::async_runtime::handle().inner().enter();
         state.node.set_short_links(settings.short_links);
     }
-    let restart = settings.relay != *state.node.relay()
-        || settings.short_links != state.node.uses_link_service();
+    let restart = needs_restart(&settings, &state.node);
     *saved = settings;
     Ok(restart)
 }
@@ -796,6 +825,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     config.relay = settings.relay.clone();
     // With short links off, the link service is only asked to remove codes registered before.
     config.short_links = settings.short_links;
+    // `load_settings` never pairs hiding the IP address with no relays.
+    config.hide_ip = settings.hide_ip;
     let node = match tauri::async_runtime::block_on(Node::start(config)) {
         Ok(node) => node,
         Err(e) => {
@@ -944,6 +975,7 @@ pub fn run() {
             remove_download,
             reveal_download,
             get_settings,
+            restart_needed,
             set_settings,
             #[cfg(desktop)]
             updates::update_info,
@@ -1051,8 +1083,14 @@ mod tests {
             auto_check_updates: true,
             show_artwork: true,
             short_links: true,
+            hide_ip: true,
         };
         assert!(validate_settings(&ok).is_ok());
+        let hidden_without_relays = Settings {
+            relay: RelayChoice::Disabled,
+            ..ok.clone()
+        };
+        assert!(validate_settings(&hidden_without_relays).is_err());
         let bad_relay = Settings {
             relay: RelayChoice::Custom("https://".into()),
             ..ok.clone()
@@ -1075,6 +1113,7 @@ mod tests {
         .unwrap();
         assert!(settings.auto_check_updates);
         assert!(settings.short_links, "short links are on unless turned off");
+        assert!(!settings.hide_ip, "hiding the IP address is opt-in");
         assert!(!settings.close_to_tray);
         assert_eq!(settings.relay, RelayChoice::Disabled);
     }
@@ -1095,6 +1134,23 @@ mod tests {
         assert!(!settings.close_to_tray);
         assert!(settings.show_artwork);
         assert!(settings.auto_check_updates);
+    }
+
+    #[test]
+    fn hiding_the_ip_address_without_relays_falls_back_to_the_default_relays() {
+        let dir = tempfile_dir();
+        let path = dir.join("hand-edited.json");
+        let json = serde_json::json!({
+            "downloadDir": dir.join("Downloads"),
+            "relay": { "mode": "disabled" },
+            "closeToTray": true,
+            "hideIp": true,
+        });
+        std::fs::write(&path, json.to_string()).unwrap();
+        let settings = load_settings(&path, std::env::temp_dir());
+        assert!(settings.hide_ip, "the address stays hidden");
+        assert_eq!(settings.relay, RelayChoice::Default);
+        assert!(validate_settings(&settings).is_ok());
     }
 
     #[test]

@@ -74,6 +74,20 @@ pub struct Config {
     /// share one in-memory book instead of using the internet.
     #[doc(hidden)]
     pub address_book: Option<iroh::address_lookup::MemoryLookup>,
+    /// Hide this device's IP address: connect to devices elsewhere only through the relay,
+    /// so they never learn it. Devices on the same local network still connect directly,
+    /// through a second endpoint that only ever uses local addresses. Needs relays.
+    pub hide_ip: bool,
+    /// Offer loopback addresses for local-network connections (tests on one machine).
+    #[doc(hidden)]
+    pub lan_loopback: bool,
+    /// Try local-network connections at all (tests turn this off to force the relay).
+    #[doc(hidden)]
+    pub lan_direct: bool,
+    /// Offer these local addresses instead of the real ones (tests: an address that never
+    /// answers, to check the fallback to the relay).
+    #[doc(hidden)]
+    pub lan_offer: Option<Vec<std::net::SocketAddr>>,
 }
 
 impl Config {
@@ -86,6 +100,10 @@ impl Config {
             links_service: Some(crate::DEFAULT_LINK_SERVICE.to_string()),
             short_links: true,
             address_book: None,
+            hide_ip: false,
+            lan_loopback: false,
+            lan_direct: true,
+            lan_offer: None,
         }
     }
 
@@ -99,6 +117,10 @@ impl Config {
             links_service: None,
             short_links: true,
             address_book: None,
+            hide_ip: false,
+            lan_loopback: true,
+            lan_direct: true,
+            lan_offer: None,
         }
     }
 }

@@ -36,6 +36,8 @@ export const api = {
   revealDownload: (id: string) => invoke<void>("reveal_download", { id }),
   getSettings: () => invoke<Settings>("get_settings"),
   setSettings: (settings: Settings) => invoke<boolean>("set_settings", { settings }),
+  /** Whether Ferry has to restart for the saved settings to take effect. */
+  restartNeeded: () => invoke<boolean>("restart_needed"),
   updateInfo: () => invoke<UpdateInfo>("update_info"),
   setAutoCheckUpdates: (enabled: boolean) => invoke<void>("set_auto_check_updates", { enabled }),
   checkForUpdates: (automatic: boolean) => invoke<string | null>("check_for_updates", { automatic }),

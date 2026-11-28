@@ -71,7 +71,7 @@ beforeEach(() => {
     node_status: () => ({ nodeId: "n", directAddresses: [] }),
     take_pending_links: () => [],
     app_info: () => ({ platform: "linux", mobile: false, distribution: "desktop" }),
-    get_settings: () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: true, shortLinks: true }),
+    get_settings: () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: true, shortLinks: true, hideIp: false }),
   };
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string, args: unknown) => {
@@ -382,7 +382,7 @@ describe("drag and drop", () => {
 
 describe("artwork", () => {
   it("follows the saved setting", async () => {
-    backend.get_settings = () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: false, shortLinks: true });
+    backend.get_settings = () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: false, shortLinks: true, hideIp: false });
     const { app } = await freshStore();
     expect(app.showArtwork).toBe(false);
   });

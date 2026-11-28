@@ -111,6 +111,8 @@ export interface Settings {
   showArtwork: boolean;
   /** Make short links through Ferry's link service. */
   shortLinks: boolean;
+  /** Connect to devices elsewhere only through the relay, hiding this device's IP address. */
+  hideIp: boolean;
 }
 
 export interface AppInfo {

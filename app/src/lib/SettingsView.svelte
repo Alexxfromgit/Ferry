@@ -17,11 +17,13 @@
   let settings = $state<Settings | null>(null);
   let relayMode = $state<"default" | "custom" | "disabled">("default");
   let relayUrl = $state("");
-  /** True while the saved relay differs from the one Ferry is running with. */
+  /** True while the saved connection settings differ from the ones Ferry is running with. Asked
+   * from the running node, so leaving Settings and coming back keeps the warning. */
   let restartNeeded = $state(false);
   const canUpdate = $derived(updatable(updates.info));
 
   onMount(() => {
+    api.restartNeeded().then((needed) => (restartNeeded = needed), () => {});
     api.getSettings().then((s) => {
       settings = s;
       relayMode = s.relay.mode;
@@ -35,6 +37,8 @@
       ...settings,
       relay:
         relayMode === "custom" ? { mode: "custom", url: relayUrl.trim() } : { mode: relayMode },
+      // Hiding the IP address needs relays.
+      hideIp: relayMode !== "disabled" && settings.hideIp,
     };
     try {
       restartNeeded = await api.setSettings(next);
@@ -150,6 +154,24 @@
           <span>No relays <span class="muted hint">Only direct connections. Many people abroad won't reach you.</span></span>
         </label>
       </fieldset>
+      <label class="check">
+        <input
+          type="checkbox"
+          bind:checked={settings.hideIp}
+          disabled={relayMode === "disabled"}
+          onchange={persist}
+        />
+        <span>
+          Hide my IP address
+          <span class="muted hint">
+            Devices on other networks reach you only through the relay, so they never learn your
+            IP address or where you are. Devices on your own network still connect directly.
+            Transfers over the internet are slower, and the relay operator still sees your
+            address; use your own relay or a VPN if that matters. Both people need this on to
+            hide their own address. Needs relays.
+          </span>
+        </span>
+      </label>
       <label class="check">
         <input
           type="checkbox"

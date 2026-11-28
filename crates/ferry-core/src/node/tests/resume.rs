@@ -11,7 +11,10 @@ struct OpenToAll(Hash);
 
 impl protocol::Handler for OpenToAll {
     async fn open(&self, _remote: EndpointId, _request: OpenRequest) -> OpenResponse {
-        OpenResponse::Ok { hash: self.0 }
+        OpenResponse::Ok {
+            hash: self.0,
+            lan: None,
+        }
     }
 }
 
