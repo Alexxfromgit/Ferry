@@ -332,13 +332,12 @@ async function refreshStatus() {
  *  first, as the splash starts once the artwork setting is. If settings can't be read, the
  *  defaults apply. */
 async function loadDisplaySettings() {
-  try {
-    const [settings, info] = await Promise.all([api.getSettings(), api.appInfo()]);
-    app.panel = isPanelStyle(info, settings.windowStyle);
-    app.showArtwork = settings.showArtwork;
-  } catch {
-    app.showArtwork = true;
+  // Separately, so app info failing can't discard a saved "artwork off".
+  const [settings, info] = await Promise.allSettled([api.getSettings(), api.appInfo()]);
+  if (settings.status === "fulfilled" && info.status === "fulfilled") {
+    app.panel = isPanelStyle(info.value, settings.value.windowStyle);
   }
+  app.showArtwork = settings.status === "fulfilled" ? settings.value.showArtwork : true;
 }
 
 /** Only Windows has the tray panel; elsewhere the setting is ignored. */

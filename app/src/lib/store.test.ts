@@ -377,6 +377,18 @@ describe("artwork", () => {
     await expect(init()).rejects.toThrow("node down");
     expect(app.showArtwork).toBe(true);
   });
+
+  it("keeps artwork off when app info can't be read", async () => {
+    backend.get_settings = () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: false });
+    backend.app_info = () => {
+      throw new Error("no info");
+    };
+    vi.resetModules();
+    const { app, init } = await import("./store.svelte");
+    await expect(init()).rejects.toThrow("no info");
+    expect(app.showArtwork).toBe(false);
+    expect(app.panel).toBe(false);
+  });
 });
 
 describe("isPanelStyle", () => {

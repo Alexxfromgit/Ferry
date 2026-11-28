@@ -30,10 +30,12 @@ const FIT_MAX_HEIGHT: f64 = 960.0;
 /// A panel never gets narrower or shorter than these, unless the screen itself is.
 const MIN_WIDTH: f64 = 320.0;
 const MIN_HEIGHT: f64 = 320.0;
-/// A press on the tray icon takes focus from the panel, hiding it, and arrives as a tray event
-/// right after. A hide waits this long for its press to arrive; only a backstop for a press
-/// that never reports, as the toggle itself follows the press, not the time.
-const PRESS_MATCH: Duration = Duration::from_secs(2);
+/// A press on the tray icon takes focus from the panel, hiding it, before its click arrives. A
+/// click this soon after such a hide is the one that closed the panel, so it doesn't reopen
+/// it; a later one (the button held down, or a click after the focus moved by keyboard) opens
+/// it again. The same as JetBrains Toolbox's tray window, where a quick click closes and a
+/// press held for a quarter of a second reopens.
+const CLICK_MATCH: Duration = Duration::from_millis(200);
 
 #[derive(Default)]
 pub struct Panel {
@@ -41,10 +43,20 @@ pub struct Panel {
     /// Native dialogs the UI has open; the panel stays while any is up.
     holds: Mutex<usize>,
     /// When losing focus hid the panel with the pointer on the tray icon: a press on the icon
-    /// took the focus, and that press's tray event is still to come.
+    /// took the focus, and that press's click is still to come.
     hidden_by_tray_press: Mutex<Option<Instant>>,
-    /// The left press on the tray icon under way: whether it found the panel open.
-    press_found_open: Mutex<Option<bool>>,
+    /// Whether the last left click on the tray icon left the panel open.
+    left_open_by_click: AtomicBool,
+    /// The second click of a double-click is under way; it changes nothing.
+    double_click: AtomicBool,
+}
+
+/// What a left click on the tray icon does to the panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Toggle {
+    Show,
+    Hide,
+    Nothing,
 }
 
 impl Panel {
@@ -71,29 +83,50 @@ impl Panel {
         *self.hidden_by_tray_press.lock().unwrap() = Some(at);
     }
 
-    /// A left press on the tray icon began at `now`, with the panel showing or not. It found the
-    /// panel open if it was showing, or if this press is what just hid it.
-    fn left_pressed(&self, visible: bool, now: Instant) {
-        let hid_by_this_press = self
+    /// A left click on the tray icon (the button came up at `now`, the panel showing or not):
+    /// it closes an open panel and opens a closed one. A panel its own press just hid counts
+    /// as open, so that click leaves it closed. With a dialog up the panel stays.
+    fn left_clicked(&self, visible: bool, now: Instant) -> Toggle {
+        let hid_by_this_click = self
             .hidden_by_tray_press
             .lock()
             .unwrap()
             .take()
-            .is_some_and(|at| now.saturating_duration_since(at) < PRESS_MATCH);
-        *self.press_found_open.lock().unwrap() = Some(visible || hid_by_this_press);
+            .is_some_and(|at| now.saturating_duration_since(at) < CLICK_MATCH);
+        let toggle = if self.double_click.swap(false, Ordering::SeqCst) {
+            // A double-click acts as one click: its second press may have hidden the panel
+            // the first click opened, so it ends as the first click left it.
+            match (self.left_open_by_click.load(Ordering::SeqCst), visible) {
+                (true, false) => Toggle::Show,
+                (false, true) => Toggle::Hide,
+                _ => Toggle::Nothing,
+            }
+        } else if hid_by_this_click {
+            Toggle::Nothing
+        } else if visible {
+            Toggle::Hide
+        } else {
+            Toggle::Show
+        };
+        // Hiding it would leave the dialog on its own.
+        let toggle = if toggle == Toggle::Hide && self.dialog_open() {
+            Toggle::Nothing
+        } else {
+            toggle
+        };
+        let open = match toggle {
+            Toggle::Show => true,
+            Toggle::Hide => false,
+            Toggle::Nothing => visible,
+        };
+        self.left_open_by_click.store(open, Ordering::SeqCst);
+        toggle
     }
 
-    /// The left button came up: whether its press found the panel open, so the click closes
-    /// it rather than opening it, however long the button was held. A release without a press
-    /// (none reported) goes by whether the panel shows.
-    fn left_released(&self, visible: bool) -> bool {
-        // A hide by this press, if it came after the press's own event, is answered too.
-        self.hidden_by_tray_press.lock().unwrap().take();
-        self.press_found_open
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or(visible)
+    /// Windows reports a double-click's second press as a double click; the click that
+    /// follows it changes nothing.
+    fn double_clicked(&self) {
+        self.double_click.store(true, Ordering::SeqCst);
     }
 
     /// Another button on the tray icon (e.g. for its menu): that press, not a left click, is
@@ -102,10 +135,13 @@ impl Panel {
         self.hidden_by_tray_press.lock().unwrap().take();
     }
 
-    /// A reloaded page starts unpinned, with no dialogs open, whatever the old one had.
+    /// A reloaded page starts unpinned, with no dialogs open, whatever the old one had, and no
+    /// tray press from before the reload decides the next click.
     fn reset(&self) {
         self.pinned.store(false, Ordering::SeqCst);
         *self.holds.lock().unwrap() = 0;
+        self.hidden_by_tray_press.lock().unwrap().take();
+        self.double_click.store(false, Ordering::SeqCst);
     }
 }
 
@@ -199,37 +235,37 @@ pub fn place(window: &WebviewWindow, size: PanelSize, icon: Option<Rect>) {
     }
 }
 
-/// Mouse events on the tray icon. A left click closes the panel if its press found it open
-/// (pressing the icon may already have hidden it, by taking its focus), and otherwise opens it
-/// by the icon.
+/// Mouse events on the tray icon. A left click closes an open panel and opens a closed one by
+/// the icon (pressing the icon may already have hidden it, by taking its focus).
 pub fn on_tray_event(app: &AppHandle, event: &TrayIconEvent) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
     let panel = app.state::<Panel>();
-    let visible = window.is_visible().unwrap_or(false);
     match *event {
-        // Windows reports a quick second press as a double click instead of a press.
+        // A click acts when the button comes up.
         TrayIconEvent::Click {
             button: MouseButton::Left,
             button_state: MouseButtonState::Down,
             ..
-        }
-        | TrayIconEvent::DoubleClick {
+        } => {}
+        TrayIconEvent::DoubleClick {
             button: MouseButton::Left,
             ..
-        } => panel.left_pressed(visible, Instant::now()),
+        } => panel.double_clicked(),
         TrayIconEvent::Click {
             button: MouseButton::Left,
             button_state: MouseButtonState::Up,
             rect,
             ..
         } => {
-            if !panel.left_released(visible) {
-                crate::show_main_at(app, Some(rect));
-            } else if visible && !panel.dialog_open() {
-                // With a dialog open it stays: hiding it would leave the dialog on its own.
-                window.hide().ok();
+            let visible = window.is_visible().unwrap_or(false);
+            match panel.left_clicked(visible, Instant::now()) {
+                Toggle::Show => crate::show_main_at(app, Some(rect)),
+                Toggle::Hide => {
+                    window.hide().ok();
+                }
+                Toggle::Nothing => {}
             }
         }
         TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. } => panel.other_button(),
@@ -505,53 +541,84 @@ mod tests {
         panel.hold(true);
         panel.reset();
         assert!(!panel.stays_open());
+        // A press from before the reload doesn't decide the next click.
+        let now = Instant::now();
+        panel.hidden_by_tray_press(now);
+        panel.reset();
+        assert_eq!(panel.left_clicked(false, now), Toggle::Show);
     }
 
-    /// A left click on the tray icon: what it does to a panel that is `visible` when the button
-    /// goes down, where the press itself hides it (by taking its focus) if `press_hides`.
-    /// Returns whether the click closes the panel. When the button comes up plays no part.
-    fn click(panel: &Panel, visible: bool, press_hides: bool) -> bool {
-        let start = Instant::now();
-        if press_hides {
-            panel.hidden_by_tray_press(start);
-        }
-        panel.left_pressed(visible, start);
-        panel.left_released(visible && !press_hides)
-    }
-
-    #[test]
-    fn a_tray_click_closes_an_open_panel_however_long_it_is_held() {
-        let panel = Panel::default();
-        // The press takes the panel's focus and hides it before the click arrives; the release
-        // (however late) closes rather than reopens.
-        assert!(click(&panel, false, true));
-        // Pinned, the press doesn't hide it; the click still closes it.
-        assert!(click(&panel, true, false));
-        // The press's own event can come before the focus loss it caused.
-        panel.left_pressed(true, Instant::now());
-        panel.hidden_by_tray_press(Instant::now());
-        assert!(panel.left_released(false));
-        // ...and that hide doesn't make the next click think the panel was open.
-        assert!(!click(&panel, false, false));
+    /// The panel's press on its tray icon hid it `held` before the button came up.
+    fn press_hid(panel: &Panel, held: Duration) -> Toggle {
+        let pressed = Instant::now();
+        panel.hidden_by_tray_press(pressed);
+        panel.left_clicked(false, pressed + held)
     }
 
     #[test]
-    fn a_tray_click_opens_a_closed_panel_however_soon_it_comes() {
+    fn a_quick_tray_click_closes_an_open_panel() {
         let panel = Panel::default();
-        // Clicking elsewhere hid it (the pointer wasn't on the icon): a click right after opens.
-        assert!(!click(&panel, false, false));
-        // A right click (the menu) that hid it doesn't count as a left press later.
-        panel.hidden_by_tray_press(Instant::now());
+        // The press takes the panel's focus and hides it before the click arrives.
+        assert_eq!(
+            press_hid(&panel, Duration::from_millis(80)),
+            Toggle::Nothing
+        );
+        // Pinned, the press doesn't hide it; the click closes it.
+        assert_eq!(panel.left_clicked(true, Instant::now()), Toggle::Hide);
+        // The click can also come before the focus loss its press caused.
+        assert_eq!(panel.left_clicked(true, Instant::now()), Toggle::Hide);
+    }
+
+    #[test]
+    fn a_held_or_late_tray_click_opens_the_panel_again() {
+        let panel = Panel::default();
+        // Held down past the match, the release reopens what the press hid.
+        assert_eq!(press_hid(&panel, CLICK_MATCH), Toggle::Show);
+        assert_eq!(press_hid(&panel, Duration::from_secs(2)), Toggle::Show);
+        // The focus moved by keyboard with the pointer on the icon: a click soon after opens.
+        assert_eq!(press_hid(&panel, Duration::from_millis(400)), Toggle::Show);
+    }
+
+    #[test]
+    fn a_tray_click_opens_a_closed_panel() {
+        let panel = Panel::default();
+        assert_eq!(panel.left_clicked(false, Instant::now()), Toggle::Show);
+        // A right click (the menu) that hid it doesn't count for a left click right after.
+        let now = Instant::now();
+        panel.hidden_by_tray_press(now);
         panel.other_button();
-        assert!(!click(&panel, false, false));
-        // A hide whose press never reported doesn't swallow a later click.
-        let long_ago = Instant::now();
-        panel.hidden_by_tray_press(long_ago);
-        panel.left_pressed(false, long_ago + PRESS_MATCH);
-        assert!(!panel.left_released(false));
-        // A release without a press goes by whether the panel shows.
-        assert!(panel.left_released(true));
-        assert!(!panel.left_released(false));
+        assert_eq!(panel.left_clicked(false, now), Toggle::Show);
+    }
+
+    #[test]
+    fn a_tray_click_leaves_the_panel_up_while_a_dialog_is() {
+        let panel = Panel::default();
+        panel.hold(true);
+        assert_eq!(panel.left_clicked(true, Instant::now()), Toggle::Nothing);
+    }
+
+    #[test]
+    fn a_double_click_toggles_once() {
+        let panel = Panel::default();
+        // Closed: the first click opens; the second press takes the focus and hides it, and
+        // the double-click puts it back, so it ends open.
+        assert_eq!(panel.left_clicked(false, Instant::now()), Toggle::Show);
+        let now = Instant::now();
+        panel.hidden_by_tray_press(now);
+        panel.double_clicked();
+        assert_eq!(panel.left_clicked(false, now), Toggle::Show);
+        // ...or, if the second press didn't take the focus, it stays open.
+        panel.double_clicked();
+        assert_eq!(panel.left_clicked(true, Instant::now()), Toggle::Nothing);
+        // Open: the first click closes, and the second changes nothing, so it ends closed.
+        assert_eq!(
+            press_hid(&panel, Duration::from_millis(80)),
+            Toggle::Nothing
+        );
+        panel.double_clicked();
+        assert_eq!(panel.left_clicked(false, Instant::now()), Toggle::Nothing);
+        // The click after a double-click is an ordinary one again.
+        assert_eq!(panel.left_clicked(false, Instant::now()), Toggle::Show);
     }
 
     #[test]
