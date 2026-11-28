@@ -41,3 +41,40 @@ async fn sharing_the_same_files_again_keeps_the_devices_let_in() {
 
     node.shutdown().await.unwrap();
 }
+
+/// Once a device has used up its guesses, it waits even with the right password, while another
+/// device with it gets in. The guesses are used up directly, so nothing depends on how fast
+/// passwords are checked or on time passing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_out_of_guesses_waits_even_with_the_right_password() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("secret.txt");
+    std::fs::write(&file, b"locked").unwrap();
+    let node = Node::start(Config::local_only(tmp.path().join("node")))
+        .await
+        .unwrap();
+    let share = node
+        .create_share_with_password(vec![file], Some("spring tide".into()))
+        .await
+        .unwrap();
+    let token = token_of(&node, &share.id);
+    let open = |password: &str| OpenRequest {
+        token,
+        password: Some(password.into()),
+    };
+
+    let guesser = SecretKey::generate().public();
+    while node.inner.guesses.take(&share.id, guesser).is_ok() {}
+    match node.handle_open(guesser, open("spring tide")).await {
+        OpenResponse::WrongPassword { retry_after_secs } => assert!(retry_after_secs > 0),
+        other => panic!("expected to wait, got {other:?}"),
+    }
+
+    let recipient = SecretKey::generate().public();
+    assert!(matches!(
+        node.handle_open(recipient, open("spring tide")).await,
+        OpenResponse::Ok { .. }
+    ));
+
+    node.shutdown().await.unwrap();
+}
