@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { open } from "./dialogs";
   import { api, message } from "./api";
-  import { app, isMobile, toast } from "./store.svelte";
+  import { app, isMobile, isPanelStyle, toast } from "./store.svelte";
   import {
     canUpdate as updatable,
     checkForUpdates,
@@ -20,10 +20,22 @@
   /** True while the saved relay differs from the one Ferry is running with. */
   let restartNeeded = $state(false);
   const canUpdate = $derived(updatable(updates.info));
+  /** Only Windows can open Ferry as a tray panel. */
+  const hasPanel = $derived(app.info?.platform === "windows" && !isMobile());
+
+  const panelSizes = [
+    { id: "compact", label: "Compact", hint: "420 × 680, for most screens." },
+    { id: "roomy", label: "Roomy", hint: "480 × 720, a little more room for tickets and downloads." },
+    { id: "fit", label: "Fit to screen height", hint: "As tall as the space above the taskbar allows." },
+  ] as const;
+
+  /** The settings as last saved, so a save that fails can put the controls back. */
+  let saved: Settings | null = null;
 
   onMount(() => {
     api.getSettings().then((s) => {
       settings = s;
+      saved = s;
       relayMode = s.relay.mode;
       relayUrl = s.relay.mode === "custom" ? s.relay.url : "";
     });
@@ -39,9 +51,14 @@
     try {
       restartNeeded = await api.setSettings(next);
       settings = next;
+      saved = next;
       app.showArtwork = next.showArtwork;
+      if (app.info) app.panel = isPanelStyle(app.info, next.windowStyle);
       toast("Settings saved");
     } catch (err) {
+      // The controls changed before the save; show what Ferry still uses. The relay fields
+      // keep what was typed, so it can be corrected.
+      if (saved) settings = { ...saved };
       toast(message(err), true);
     }
   }
@@ -96,13 +113,44 @@
     {#if !isMobile()}
       <section class="glass card">
         <h2>Window</h2>
-        <label class="check">
-          <input type="checkbox" bind:checked={settings.closeToTray} onchange={persist} />
-          <span>
-            Keep sharing when the window is closed
-            <span class="muted hint">Ferry stays in the system tray. Use Quit Ferry from the tray to stop.</span>
-          </span>
-        </label>
+        <div class="window-groups">
+          {#if hasPanel}
+            <fieldset>
+              <legend class="label">Open Ferry as</legend>
+              <label class="radio">
+                <input type="radio" name="window-style" value="panel" bind:group={settings.windowStyle} onchange={persist} />
+                <span>
+                  Tray panel
+                  <span class="muted hint">Opens by the tray icon and hides when you click elsewhere. Pin it to keep it open.</span>
+                </span>
+              </label>
+              <label class="radio">
+                <input type="radio" name="window-style" value="window" bind:group={settings.windowStyle} onchange={persist} />
+                <span>Regular window <span class="muted hint">A window you can move and resize.</span></span>
+              </label>
+            </fieldset>
+            {#if settings.windowStyle === "panel"}
+              <fieldset>
+                <legend class="label">Panel size</legend>
+                {#each panelSizes as size (size.id)}
+                  <label class="radio">
+                    <input type="radio" name="panel-size" value={size.id} bind:group={settings.panelSize} onchange={persist} />
+                    <span>{size.label} <span class="muted hint">{size.hint}</span></span>
+                  </label>
+                {/each}
+              </fieldset>
+            {/if}
+          {/if}
+          {#if !hasPanel || settings.windowStyle === "window"}
+            <label class="check">
+              <input type="checkbox" bind:checked={settings.closeToTray} onchange={persist} />
+              <span>
+                Keep sharing when the window is closed
+                <span class="muted hint">Ferry stays in the system tray. Use Quit Ferry from the tray to stop.</span>
+              </span>
+            </label>
+          {/if}
+        </div>
       </section>
     {/if}
 
@@ -275,6 +323,16 @@
   .label {
     font-size: var(--t-sm);
     color: var(--ink-soft);
+  }
+
+  .window-groups {
+    display: grid;
+    gap: 1.1rem;
+  }
+
+  legend.label {
+    padding: 0;
+    margin-bottom: 0.15rem;
   }
 
   .value {

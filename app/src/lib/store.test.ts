@@ -377,4 +377,63 @@ describe("artwork", () => {
     await expect(init()).rejects.toThrow("node down");
     expect(app.showArtwork).toBe(true);
   });
+
+  it("keeps artwork off when app info can't be read", async () => {
+    backend.get_settings = () => ({ downloadDir: "/d", relay: { mode: "default" }, closeToTray: true, showArtwork: false });
+    backend.app_info = () => {
+      throw new Error("no info");
+    };
+    vi.resetModules();
+    const { app, init } = await import("./store.svelte");
+    await expect(init()).rejects.toThrow("no info");
+    expect(app.showArtwork).toBe(false);
+    expect(app.panel).toBe(false);
+  });
+});
+
+describe("isPanelStyle", () => {
+  it("is the tray panel only on Windows desktops that choose it", async () => {
+    const { isPanelStyle } = await import("./store.svelte");
+    const windows = { platform: "windows", mobile: false, distribution: "desktop" } as const;
+    expect(isPanelStyle(windows, "panel")).toBe(true);
+    expect(isPanelStyle(windows, undefined)).toBe(true);
+    expect(isPanelStyle(windows, "window")).toBe(false);
+    expect(isPanelStyle({ ...windows, platform: "macos" }, "panel")).toBe(false);
+    expect(isPanelStyle({ ...windows, platform: "linux" }, "panel")).toBe(false);
+    expect(isPanelStyle({ platform: "android", mobile: true, distribution: "play" }, "panel")).toBe(false);
+  });
+});
+
+describe("tray panel", () => {
+  it("is known from the settings by the time startup is done", async () => {
+    backend.app_info = () => ({ platform: "windows", mobile: false, distribution: "desktop" });
+    const { app } = await freshStore();
+    // Settings saved before the option existed have no windowStyle: the panel is the default.
+    expect(app.panel).toBe(true);
+    backend.get_settings = () => ({
+      downloadDir: "/d",
+      relay: { mode: "default" },
+      closeToTray: true,
+      showArtwork: true,
+      windowStyle: "window",
+    });
+    expect((await freshStore()).app.panel).toBe(false);
+  });
+
+  it("pins, and shows it unpinned again when that fails", async () => {
+    const pins: boolean[] = [];
+    backend.set_panel_pinned = ({ pinned }) => {
+      pins.push(pinned);
+    };
+    const { app, setPinned } = await freshStore();
+    await setPinned(true);
+    expect(app.pinned).toBe(true);
+    backend.set_panel_pinned = () => {
+      throw new Error("no panel");
+    };
+    await setPinned(false);
+    expect(app.pinned).toBe(true);
+    expect(app.toast).toEqual({ text: "no panel", error: true });
+    expect(pins).toEqual([true]);
+  });
 });

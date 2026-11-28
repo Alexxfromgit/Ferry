@@ -5,11 +5,11 @@
 </script>
 
 <script lang="ts">
-  let { mode, phone = false }: { mode: SceneMode; phone?: boolean } = $props();
+  let { mode, phone = false, panel = false }: { mode: SceneMode; phone?: boolean; panel?: boolean } = $props();
 </script>
 
 <!-- The mascot in her chair, bottom right, fading into the neon streaks behind the glass. -->
-<div class="scene" class:phone data-mode={mode} aria-hidden="true">
+<div class="scene" class:phone class:panel data-mode={mode} aria-hidden="true">
   <img src="/art/scene-portrait.webp" alt="" decoding="async" />
 </div>
 
@@ -56,10 +56,22 @@
     mask-image: none;
   }
 
+  /* The tray panel has its tabs at the top, so she rests on the bottom edge. */
+  .scene.phone.panel {
+    bottom: 0;
+  }
+
   .scene.phone img {
     object-position: center bottom;
     -webkit-mask-image: linear-gradient(to bottom, transparent, #000 45%);
     mask-image: linear-gradient(to bottom, transparent, #000 45%);
+  }
+
+  /* On phone-shaped screens (phones and the tray panel) she sits right behind the words, not
+     beside them, so even as the illustration she's dimmed enough to keep them readable. */
+  .scene.phone[data-mode="hero"] {
+    opacity: 0.5;
+    filter: brightness(0.8) saturate(0.9);
   }
 
   .scene[data-mode="ambient"] {

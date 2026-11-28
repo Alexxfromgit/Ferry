@@ -98,7 +98,7 @@ const fakeQr = (() => {
 
 // ?empty starts with nothing shared or downloaded; ?slow makes starting take 2 seconds, longer
 // than the startup intro.
-// ?mobile previews the phone build.
+// ?mobile previews the phone build; ?panel the Windows tray panel (view it at 420×680).
 const params = new URLSearchParams(location.search);
 const empty = params.has("empty");
 const slow = params.has("slow");
@@ -114,6 +114,8 @@ const settings = {
   relay: { mode: "default" },
   closeToTray: true,
   showArtwork: true,
+  windowStyle: params.has("panel") ? "panel" : "window",
+  panelSize: "compact",
 };
 
 export function installDevPreview() {
@@ -141,6 +143,9 @@ export function installDevPreview() {
           return empty ? [] : downloads;
         case "open_project_page":
         case "open_third_party_notices":
+        case "set_panel_pinned":
+        case "panel_hold":
+        case "hide_panel":
           return null;
         case "share_qr":
           return fakeQr;

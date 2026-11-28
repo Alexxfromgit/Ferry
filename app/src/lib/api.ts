@@ -44,6 +44,10 @@ export const api = {
   takeIncoming: () => invoke<string[][]>("take_incoming"),
   shareItems: (uris: string[]) => invoke<ShareInfo>("share_items", { uris }),
   shareLink: (id: string) => invoke<void>("share_link", { id }),
+  // Windows tray panel: pinned, it stays open when focus moves away; held, a dialog is up.
+  setPanelPinned: (pinned: boolean) => invoke<void>("set_panel_pinned", { pinned }),
+  panelHold: (held: boolean) => invoke<void>("panel_hold", { held }),
+  hidePanel: () => invoke<void>("hide_panel"),
   openProjectPage: () => invoke<void>("open_project_page"),
   openThirdPartyNotices: () => invoke<void>("open_third_party_notices"),
 };

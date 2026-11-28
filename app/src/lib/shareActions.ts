@@ -1,6 +1,6 @@
 // What a share's ticket and its compact strip both do, so the two views behave the same.
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { ask } from "@tauri-apps/plugin-dialog";
+import { ask } from "./dialogs";
 import { api, message } from "./api";
 import { bytes, plural } from "./format";
 import { app, share as createShare, toast } from "./store.svelte";
