@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::Context;
 use futures_buffered::BufferedStreamExt;
-use iroh::{Endpoint, RelayMode, endpoint::presets, protocol::Router};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, endpoint::presets, protocol::Router};
 use iroh_blobs::{
     BlobFormat, BlobsProtocol, Hash, HashAndFormat,
     api::{
@@ -31,7 +31,6 @@ use iroh_blobs::{
         GcConfig,
         fs::{FsStore, options::Options},
     },
-    ticket::BlobTicket,
 };
 use n0_future::{StreamExt, task::AbortOnDropHandle};
 use serde::{Deserialize, Serialize};
@@ -39,17 +38,19 @@ use tokio::sync::broadcast;
 use walkdir::WalkDir;
 
 use crate::{
+    access::{self, GuessLimiter},
     config::{Config, RelayChoice},
     events::{ConnectionKind, Event},
     identity,
-    link::{FileEntry, ShareFile, ShareLink},
+    link::{FileEntry, ShareLink, ShareToken},
+    protocol::{self, OpenRequest, OpenResponse},
     provider::{self, ProviderState},
     registry::{
         DownloadInfo, DownloadStatus, FileLists, ListedFile, MAX_SKIPPED_LISTED, Registry,
-        ShareInfo, SkipReason, SkippedItem,
+        ShareAccess, ShareInfo, SkipReason, SkippedItem,
     },
     speed::SpeedMeter,
-    util,
+    ticket_file, util,
 };
 
 /// Largest collection index (list of file hashes) we accept from a peer.
@@ -64,6 +65,8 @@ const GC_INTERVAL: Duration = Duration::from_secs(600);
 const IMPORT_PARALLELISM: usize = 4;
 /// How many file names a preview carries; the UI shows a few, the CLI up to 20.
 pub const PREVIEW_FILES: usize = 200;
+/// Password checks that may run at once (see `Inner::password_checks`).
+const PASSWORD_CHECKS: usize = 2;
 
 fn share_tag(hash: &Hash) -> String {
     format!("ferry/share/{}", hash.to_hex())
@@ -87,6 +90,57 @@ fn parse_id(id: &str) -> anyhow::Result<(Hash, String)> {
     anyhow::ensure!(hex || base32, "invalid id {id:?}");
     let hash = Hash::from_str(id).context("invalid id")?;
     Ok((hash, hash.to_hex().to_string()))
+}
+
+/// A device id as stored in the registry (hex).
+fn device_hex(device: &EndpointId) -> String {
+    hex::encode(device.as_bytes())
+}
+
+fn parse_device(text: &str) -> Option<EndpointId> {
+    let bytes: [u8; 32] = hex::decode(text).ok()?.try_into().ok()?;
+    EndpointId::from_bytes(&bytes).ok()
+}
+
+/// Why the sender did not hand over a share. Callers can tell these apart (with
+/// `anyhow::Error::downcast_ref`) to ask for a password.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccessError {
+    /// The share is locked; ask for its password.
+    PasswordRequired,
+    WrongPassword,
+    /// Too many wrong passwords were tried; the sender takes no more for a while.
+    TooManyGuesses {
+        retry_after_secs: u64,
+    },
+}
+
+impl std::fmt::Display for AccessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PasswordRequired => f.write_str("this share is protected with a password"),
+            Self::WrongPassword => f.write_str("that password is not right"),
+            Self::TooManyGuesses { retry_after_secs } => write!(
+                f,
+                "too many wrong passwords; try again in {retry_after_secs} seconds"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AccessError {}
+
+/// Lets the `ferry/1` protocol reach the node that serves it (set once the node exists).
+#[derive(Default)]
+struct Handle(OnceLock<Weak<Inner>>);
+
+impl protocol::Handler for Handle {
+    async fn open(&self, remote: EndpointId, request: OpenRequest) -> OpenResponse {
+        match self.0.get().and_then(Weak::upgrade) {
+            Some(inner) => Node { inner }.handle_open(remote, request).await,
+            None => OpenResponse::Unavailable,
+        }
+    }
 }
 
 /// Network identity and reachability of this node.
@@ -167,6 +221,11 @@ struct Inner {
     /// created again meanwhile, and events arrive in the order the changes were made.
     share_ops: tokio::sync::Mutex<()>,
     provider: Arc<ProviderState>,
+    /// Limits password guesses per share.
+    guesses: GuessLimiter,
+    /// Password checks running at once. Each one is memory-hard (about 19 MiB), so a burst of
+    /// guesses from many devices must not run them all together.
+    password_checks: Arc<tokio::sync::Semaphore>,
     events: broadcast::Sender<Event>,
     downloads: Mutex<HashMap<String, Running>>,
     next_op: AtomicU64,
@@ -201,7 +260,7 @@ impl Node {
         let endpoint = builder
             .secret_key(secret)
             .relay_mode(relay_mode)
-            .alpns(vec![iroh_blobs::ALPN.to_vec()])
+            .alpns(vec![iroh_blobs::ALPN.to_vec(), protocol::ALPN.to_vec()])
             .bind()
             .await
             .context("binding network endpoint")?;
@@ -219,6 +278,13 @@ impl Node {
 
         let registry_path = data_dir.join("registry.json");
         let (mut registry, legacy_lists) = Registry::load(&registry_path)?;
+        // It holds share tokens and password hashes; one written before it was kept private
+        // (by an older Ferry, or copied in) is made private now, with the same contents.
+        if let Ok(saved) = std::fs::read(&registry_path)
+            && let Err(e) = util::make_private(&registry_path, &saved)
+        {
+            tracing::warn!("could not make the registry private: {e:#}");
+        }
         let file_lists = FileLists::new(data_dir.join("shares"));
         // Registries from earlier versions kept every file list inline; move them out.
         let migrated = !legacy_lists.is_empty();
@@ -226,6 +292,16 @@ impl Node {
             let listed: Vec<ListedFile> = files.into_iter().map(ListedFile::from).collect();
             if let Err(e) = file_lists.write(&id, &listed) {
                 tracing::warn!(%id, "could not move a share's file list: {e:#}");
+            }
+        }
+        // Every share has its own token; the access of shares that are gone is dropped.
+        let mut access_changed = false;
+        for share in &registry.shares {
+            if !registry.access.contains_key(&share.id) {
+                registry
+                    .access
+                    .insert(share.id.clone(), ShareAccess::generate());
+                access_changed = true;
             }
         }
         let provider = Arc::new(ProviderState::new(file_lists.clone()));
@@ -242,19 +318,34 @@ impl Node {
                 false
             }
         });
+        let ids: HashSet<String> = registry.shares.iter().map(|s| s.id.clone()).collect();
+        let before = registry.access.len();
+        registry.access.retain(|id, _| ids.contains(id));
+        access_changed |= registry.access.len() != before;
+        for (id, access) in &registry.access {
+            if let Ok((hash, _)) = parse_id(id) {
+                provider.set_grants(hash, access.grants.iter().filter_map(|d| parse_device(d)));
+            }
+        }
 
         let (provider_tx, provider_rx) = tokio::sync::mpsc::channel(64);
         let blobs = BlobsProtocol::new(
             &store,
             Some(EventSender::new(provider_tx, provider::EVENT_MASK)),
         );
+        let handle = Arc::new(Handle::default());
         let router = Router::builder(endpoint)
             .accept(iroh_blobs::ALPN, blobs)
+            .accept(protocol::ALPN, protocol::Protocol::new(handle.clone()))
             .spawn();
 
         let (events, _) = broadcast::channel(1024);
         let tasks = vec![
-            AbortOnDropHandle::new(tokio::spawn(provider::run(provider.clone(), provider_rx))),
+            AbortOnDropHandle::new(tokio::spawn(provider::run(
+                provider.clone(),
+                0,
+                provider_rx,
+            ))),
             AbortOnDropHandle::new(tokio::spawn(provider::emit_activity(
                 provider.clone(),
                 events.clone(),
@@ -283,6 +374,8 @@ impl Node {
                 save_lock: Mutex::new(()),
                 share_ops: tokio::sync::Mutex::new(()),
                 provider,
+                guesses: GuessLimiter::default(),
+                password_checks: Arc::new(tokio::sync::Semaphore::new(PASSWORD_CHECKS)),
                 events,
                 downloads: Mutex::new(HashMap::new()),
                 next_op: AtomicU64::new(1),
@@ -290,7 +383,8 @@ impl Node {
                 _tasks: tasks,
             }),
         };
-        if migrated {
+        handle.0.set(Arc::downgrade(&node.inner)).ok();
+        if migrated || access_changed {
             node.persist();
         }
         for id in resume {
@@ -346,7 +440,8 @@ impl Node {
     fn try_persist(&self) -> anyhow::Result<()> {
         let _guard = self.inner.save_lock.lock().unwrap();
         let json = self.inner.registry.lock().unwrap().to_json()?;
-        util::write_atomic(&self.inner.registry_path, &json)
+        // It holds the shares' tokens and password hashes.
+        util::write_atomic_private(&self.inner.registry_path, &json)
     }
 
     /// Commit pending store changes before handing off to an installer that exits the process.
@@ -374,16 +469,34 @@ impl Node {
 
     // ---------------------------------------------------------------- shares
 
-    fn ticket_for(&self, hash: Hash) -> BlobTicket {
-        BlobTicket::new(self.endpoint().addr(), hash, BlobFormat::HashSeq)
+    /// The full link of a share. It carries this device's addresses only when no relays are
+    /// used, since a recipient could not find the device otherwise.
+    fn link_for(&self, token: ShareToken) -> ShareLink {
+        let id = self.endpoint().id();
+        if matches!(self.inner.relay, RelayChoice::Disabled) {
+            let addr = self.endpoint().addr();
+            let addrs: Vec<_> = addr.ip_addrs().copied().collect();
+            ShareLink::with_addrs(id, token, &addrs)
+        } else {
+            ShareLink::direct(id, token)
+        }
     }
 
-    /// Fill in the link and ticket with the node's current addresses.
+    /// Fill in the link, code and lock state of a share.
     fn with_link(&self, mut share: ShareInfo) -> ShareInfo {
-        if let Ok((hash, _)) = parse_id(&share.id) {
-            let ticket = self.ticket_for(hash);
-            share.link = ShareLink::new(ticket.clone()).to_url();
-            share.ticket = ticket.to_string();
+        let access = self
+            .inner
+            .registry
+            .lock()
+            .unwrap()
+            .access
+            .get(&share.id)
+            .cloned();
+        if let Some(access) = access {
+            let link = self.link_for(access.token);
+            share.link = link.to_url();
+            share.code = link.code();
+            share.locked = access.password.is_some();
         }
         share
     }
@@ -392,7 +505,24 @@ impl Node {
     /// must not be modified or moved while shared. Empty folders, symlinks and OS junk files
     /// (`.DS_Store`, `Thumbs.db`, …) are skipped.
     pub async fn create_share(&self, paths: Vec<PathBuf>) -> anyhow::Result<ShareInfo> {
+        self.create_share_with_password(paths, None).await
+    }
+
+    /// Like [`Node::create_share`], with a password that recipients need (`None` keeps the
+    /// password a share of the same files already has). The password is in place before the
+    /// share is served, so nobody holding an earlier link to the same files gets in without it.
+    pub async fn create_share_with_password(
+        &self,
+        paths: Vec<PathBuf>,
+        password: Option<String>,
+    ) -> anyhow::Result<ShareInfo> {
         anyhow::ensure!(!paths.is_empty(), "nothing to share");
+        let hashed = match password {
+            Some(password) => {
+                Some(tokio::task::spawn_blocking(move || access::hash_password(&password)).await??)
+            }
+            None => None,
+        };
         let op_id = self.inner.next_op.fetch_add(1, Ordering::Relaxed);
 
         // Flatten the inputs into (collection name, absolute path, size, index of the item).
@@ -604,7 +734,8 @@ impl Node {
             total_size: total_bytes,
             created_at: util::now_unix(),
             link: String::new(),
-            ticket: String::new(),
+            code: String::new(),
+            locked: false,
             skipped: skipped.items,
             skipped_count: skipped.count,
             paused: false,
@@ -622,11 +753,32 @@ impl Node {
             let mut registry = self.inner.registry.lock().unwrap();
             registry.shares.retain(|s| s.id != share.id);
             registry.shares.push(share.clone());
+            // Sharing the same files again keeps their link (and password).
+            let access = registry
+                .access
+                .entry(share.id.clone())
+                .or_insert_with(ShareAccess::generate);
+            if let Some(hashed) = &hashed {
+                // A new password: only devices that give it get in, as with `set_share_password`.
+                access.password = Some(hashed.clone());
+                access.grants.clear();
+                self.inner.provider.set_grants(hash, []);
+            } else {
+                // Added to the devices let in already, not put in their place: sharing the same
+                // files again must not end the downloads of an open share's recipients, whose
+                // grants are kept only in memory.
+                for device in access.grants.iter().filter_map(|d| parse_device(d)) {
+                    self.inner.provider.grant(hash, device);
+                }
+            }
             self.inner.provider.allow(
                 hash,
                 share.total_size,
                 Some(files.iter().map(|f| f.size).collect()),
             );
+        }
+        if hashed.is_some() {
+            self.inner.guesses.reset(&share.id);
         }
         self.persist();
         let share = self.with_link(share);
@@ -654,17 +806,150 @@ impl Node {
         self.inner.file_lists.read(&share.id)
     }
 
-    /// Contents for a `.ferry` file of the given share.
-    pub fn share_file(&self, id: &str) -> anyhow::Result<ShareFile> {
-        let share = self.share(id).context("unknown share")?;
-        let ticket = BlobTicket::from_str(&share.ticket)?;
-        let files = self.inner.file_lists.read(&share.id).unwrap_or_default();
-        Ok(ShareFile::new(
-            &ticket,
-            share.name,
-            share.total_size,
-            &files,
-        ))
+    /// Save a `.ferry` file of a share. It holds only the link data; a locked share's file is
+    /// no different, since its token gets nobody in without the password, and encrypting it
+    /// with that password would let whoever holds the file guess the password offline.
+    pub async fn save_share_file(&self, id: &str, path: &Path) -> anyhow::Result<()> {
+        let (_, id) = parse_id(id).context("invalid share id")?;
+        let access = self
+            .inner
+            .registry
+            .lock()
+            .unwrap()
+            .access
+            .get(&id)
+            .cloned()
+            .context("unknown share")?;
+        let link = self.link_for(access.token);
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || ticket_file::save_ticket_file(&path, &link)).await?
+    }
+
+    /// Protect a share with a password, change it, or remove it (`None`). Devices that
+    /// opened the share before must open it again (with the new password); their running
+    /// downloads stop.
+    pub async fn set_share_password(
+        &self,
+        id: &str,
+        password: Option<String>,
+    ) -> anyhow::Result<ShareInfo> {
+        let (hash, id) = parse_id(id).context("invalid share id")?;
+        let hashed = match password {
+            Some(password) => {
+                Some(tokio::task::spawn_blocking(move || access::hash_password(&password)).await??)
+            }
+            None => None,
+        };
+        let _ops = self.inner.share_ops.lock().await;
+        let updated = {
+            let mut registry = self.inner.registry.lock().unwrap();
+            let share = registry.share(&id).cloned().context("unknown share")?;
+            let access = registry
+                .access
+                .entry(id.clone())
+                .or_insert_with(ShareAccess::generate);
+            access.password = hashed;
+            access.grants.clear();
+            self.inner.provider.set_grants(hash, []);
+            share
+        };
+        self.inner.guesses.reset(&id);
+        let saved = self.try_persist();
+        let updated = self.with_link(updated);
+        self.emit(Event::ShareUpdated {
+            share: updated.clone(),
+        });
+        saved.context("the password is set, but Ferry couldn't save it; set it again")?;
+        Ok(updated)
+    }
+
+    /// Answer a recipient asking for a share (the sender side of `ferry/1`).
+    async fn handle_open(&self, remote: EndpointId, request: OpenRequest) -> OpenResponse {
+        let remote_hex = device_hex(&remote);
+        let found = {
+            let registry = self.inner.registry.lock().unwrap();
+            registry
+                .access
+                .iter()
+                .find(|(_, access)| access.token == request.token)
+                .and_then(|(id, access)| {
+                    let share = registry.share(id)?;
+                    Some((
+                        id.clone(),
+                        share.paused,
+                        access.password.clone(),
+                        access.grants.contains(&remote_hex),
+                    ))
+                })
+        };
+        let Some((id, paused, password_hash, granted)) = found else {
+            return OpenResponse::Unavailable;
+        };
+        let Ok((hash, _)) = parse_id(&id) else {
+            return OpenResponse::Unavailable;
+        };
+        if paused {
+            return OpenResponse::Unavailable;
+        }
+        if let Some(stored) = password_hash.clone()
+            && !granted
+        {
+            let Some(password) = request.password else {
+                return OpenResponse::PasswordRequired;
+            };
+            if let Err(wait) = self.inner.guesses.take(&id, remote) {
+                return OpenResponse::WrongPassword {
+                    retry_after_secs: wait.as_secs().max(1),
+                };
+            }
+            // The permit is held by the check itself, so a request that times out meanwhile
+            // can't free it while the hash is still being computed.
+            let Ok(permit) = self.inner.password_checks.clone().acquire_owned().await else {
+                return OpenResponse::Unavailable;
+            };
+            let verified = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                access::verify_password(&stored, &password)
+            })
+            .await;
+            match verified {
+                Ok(Ok(true)) => self.inner.guesses.give_back(&id, remote),
+                Ok(Ok(false)) => {
+                    return OpenResponse::WrongPassword {
+                        retry_after_secs: 0,
+                    };
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(%id, "could not check a password: {e:#}");
+                    return OpenResponse::Unavailable;
+                }
+                Err(e) => {
+                    tracing::warn!(%id, "could not check a password: {e}");
+                    return OpenResponse::Unavailable;
+                }
+            }
+        }
+        let changed = {
+            let mut registry = self.inner.registry.lock().unwrap();
+            // The share may have been removed, or got a new password, while this was checked.
+            let Some(access) = registry.access.get_mut(&id) else {
+                return OpenResponse::Unavailable;
+            };
+            if access.token != request.token || access.password != password_hash {
+                return OpenResponse::Unavailable;
+            }
+            self.inner.provider.grant(hash, remote);
+            // Only a locked share's grants are saved, so a device let in with the password can
+            // resume after a restart without it. Anyone with an open share's link is simply
+            // let in again.
+            access.password.is_some() && access.grant(device_hex(&remote))
+        };
+        if changed {
+            // Saving writes and syncs a file; keep it off the async threads.
+            let node = self.clone();
+            tokio::task::spawn_blocking(move || node.persist());
+        }
+        OpenResponse::Ok { hash }
     }
 
     /// Stop serving a share. New requests are refused and running transfers are ended.
@@ -679,8 +964,10 @@ impl Node {
             let mut registry = self.inner.registry.lock().unwrap();
             anyhow::ensure!(registry.share(&id).is_some(), "unknown share");
             registry.shares.retain(|s| s.id != id);
+            registry.access.remove(&id);
             self.inner.provider.disallow(&hash);
         }
+        self.inner.guesses.reset(&id);
         self.persist();
         self.inner.store.tags().delete(share_tag(&hash)).await?;
         self.inner.file_lists.remove(&id);
@@ -765,11 +1052,69 @@ impl Node {
 
     // ------------------------------------------------------------- downloads
 
-    async fn connect(&self, ticket: &BlobTicket) -> anyhow::Result<iroh::endpoint::Connection> {
+    async fn connect(
+        &self,
+        addr: EndpointAddr,
+        alpn: &[u8],
+    ) -> anyhow::Result<iroh::endpoint::Connection> {
         self.endpoint()
-            .connect(ticket.addr().clone(), iroh_blobs::ALPN)
+            .connect(addr, alpn)
             .await
             .context("could not reach the sender (is their Ferry running?)")
+    }
+
+    /// The device and token a link names, looking up a short code if needed.
+    async fn resolve(&self, link: &ShareLink) -> anyhow::Result<ShareLink> {
+        match link {
+            ShareLink::Direct { .. } => Ok(link.clone()),
+            ShareLink::Code(_) => anyhow::bail!(
+                "this Ferry can't open short links yet; ask the sender for the full link"
+            ),
+        }
+    }
+
+    /// Ask the sender named by a direct link for the share; on success this device may fetch
+    /// it, and the share's root hash is returned with the sender's address.
+    async fn open_share(
+        &self,
+        link: &ShareLink,
+        password: Option<String>,
+    ) -> anyhow::Result<(Hash, EndpointAddr)> {
+        let ShareLink::Direct {
+            endpoint,
+            token,
+            addrs,
+        } = link
+        else {
+            anyhow::bail!("this link must be looked up first");
+        };
+        let addr = EndpointAddr::from_parts(
+            *endpoint,
+            addrs.iter().copied().map(iroh::TransportAddr::Ip),
+        );
+        let conn = self.connect(addr.clone(), protocol::ALPN).await?;
+        let answer = protocol::open(
+            &conn,
+            OpenRequest {
+                token: *token,
+                password,
+            },
+        )
+        .await;
+        conn.close(0u32.into(), b"done");
+        match answer? {
+            OpenResponse::Ok { hash } => Ok((hash, addr)),
+            OpenResponse::PasswordRequired => Err(AccessError::PasswordRequired.into()),
+            OpenResponse::WrongPassword {
+                retry_after_secs: 0,
+            } => Err(AccessError::WrongPassword.into()),
+            OpenResponse::WrongPassword { retry_after_secs } => {
+                Err(AccessError::TooManyGuesses { retry_after_secs }.into())
+            }
+            OpenResponse::Unavailable => anyhow::bail!(
+                "the sender isn't sharing this right now: they turned sharing off or removed it"
+            ),
+        }
     }
 
     /// Fetch and check a share's index (file names and sizes) without any file data.
@@ -812,10 +1157,16 @@ impl Node {
         })
     }
 
-    /// Fetch the file list and sizes of a share without downloading the files.
-    pub async fn preview(&self, link: &ShareLink) -> anyhow::Result<Preview> {
-        let hash = link.ticket.hash();
-        let conn = self.connect(&link.ticket).await?;
+    /// Fetch the file list and sizes of a share without downloading the files. A locked
+    /// share needs its `password` (see [`AccessError`]).
+    pub async fn preview(
+        &self,
+        link: &ShareLink,
+        password: Option<String>,
+    ) -> anyhow::Result<Preview> {
+        let link = self.resolve(link).await?;
+        let (hash, addr) = self.open_share(&link, password).await?;
+        let conn = self.connect(addr, iroh_blobs::ALPN).await?;
         let connection = selected_path(&conn);
         let index = self.fetch_index(&conn, hash).await;
         conn.close(0u32.into(), b"done");
@@ -849,15 +1200,18 @@ impl Node {
         self.inner.downloads.lock().unwrap().contains_key(id)
     }
 
-    /// Start (or restart) downloading a share into `dest_dir`.
+    /// Start (or restart) downloading a share into `dest_dir`. A locked share needs its
+    /// `password` (see [`AccessError`]); resuming later doesn't.
     pub async fn start_download(
         &self,
         link: &ShareLink,
+        password: Option<String>,
         dest_dir: PathBuf,
     ) -> anyhow::Result<DownloadInfo> {
         // Saving needs an absolute path; resolve it now, not after the whole transfer.
         let dest_dir = std::path::absolute(&dest_dir).context("invalid destination folder")?;
-        let hash = link.ticket.hash();
+        let link = self.resolve(link).await?;
+        let (hash, _) = self.open_share(&link, password).await?;
         let id = hash.to_hex().to_string();
         if self.is_running(&id) {
             return self
@@ -874,7 +1228,7 @@ impl Node {
             .await?;
         let info = DownloadInfo {
             id: id.clone(),
-            ticket: link.ticket.to_string(),
+            link: link.to_url(),
             dest_dir,
             name: String::new(),
             status: DownloadStatus::Connecting,
@@ -1042,9 +1396,8 @@ impl Node {
 
     async fn run_download(&self, id: &str, generation: u64) -> anyhow::Result<PathBuf> {
         let info = self.download(id).context("unknown download")?;
-        let ticket = BlobTicket::from_str(&info.ticket)?;
-        let hash = ticket.hash();
-        let content = ticket.hash_and_format();
+        let (hash, _) = parse_id(&info.id)?;
+        let content = HashAndFormat::hash_seq(hash);
         let store = &self.inner.store;
 
         let local = store.remote().local(content).await?;
@@ -1056,7 +1409,29 @@ impl Node {
             self.update_if_current(id, generation, true, |d| {
                 d.status = DownloadStatus::Connecting
             });
-            let conn = self.connect(&ticket).await?;
+            // This device was let in when the download started, so no password is needed.
+            anyhow::ensure!(
+                !info.link.is_empty(),
+                "this download was started by an older version of Ferry; open the link again"
+            );
+            let link = ShareLink::parse(&info.link)?;
+            let (served, addr) = self.open_share(&link, None).await.map_err(|e| {
+                if e.downcast_ref::<AccessError>().is_some() {
+                    // A new password is the usual reason, but a sender also remembers only so
+                    // many devices per locked share (`MAX_SAVED_GRANTS`), so don't claim which.
+                    e.context(
+                        "the sender asks for the share's password again (they may have changed \
+                         it); open the link again and enter it",
+                    )
+                } else {
+                    e
+                }
+            })?;
+            anyhow::ensure!(
+                served == hash,
+                "the sender now shares different files under this link"
+            );
+            let conn = self.connect(addr, iroh_blobs::ALPN).await?;
             let _watcher = self.watch_connection(id, generation, conn.clone());
             // Names and sizes are checked before any file data is transferred.
             let index = self.fetch_index(&conn, hash).await?;
@@ -1312,6 +1687,7 @@ fn dunce_canonicalize(path: &Path) -> anyhow::Result<PathBuf> {
 mod tests {
     use super::*;
 
+    mod access;
     mod resume;
 
     #[test]

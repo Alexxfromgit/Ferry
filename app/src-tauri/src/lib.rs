@@ -21,8 +21,8 @@ use std::{
 };
 
 use ferry_core::{
-    Config, DownloadInfo, DownloadStatus, Event, Node, NodeStatus, Preview, RelayChoice,
-    SHARE_FILE_EXTENSION, ShareInfo, ShareLink, TicketFile, TicketPassword,
+    AccessError, Config, DownloadInfo, DownloadStatus, Event, Node, NodeStatus, Preview,
+    RelayChoice, SHARE_FILE_EXTENSION, ShareInfo, ShareLink,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WindowEvent, path::BaseDirectory};
@@ -79,11 +79,19 @@ enum IncomingShare {
     File { path: PathBuf },
 }
 
+/// A preview, or why the sender wants a (different) password first.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-enum OpenedTicket {
-    Ready { link: String },
+enum PreviewOutcome {
+    Ready {
+        preview: Preview,
+    },
     PasswordRequired,
+    WrongPassword,
+    #[serde(rename_all = "camelCase")]
+    TooManyGuesses {
+        retry_after_secs: u64,
+    },
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -171,13 +179,8 @@ async fn remove_share(
 
 /// Write a `.ferry` file. The extension is always `.ferry`, whatever the path says.
 #[tauri::command]
-async fn save_share_file(
-    state: State<'_, AppState>,
-    id: String,
-    path: PathBuf,
-    password: Option<String>,
-) -> CmdResult<()> {
-    let file = state.node.share_file(&id).map_err(fail)?;
+async fn save_share_file(state: State<'_, AppState>, id: String, path: PathBuf) -> CmdResult<()> {
+    let node = state.node.clone();
     let path = if has_ticket_extension(&path) {
         path
     } else {
@@ -185,18 +188,28 @@ async fn save_share_file(
         name.push(format!(".{SHARE_FILE_EXTENSION}"));
         PathBuf::from(name)
     };
-    let password = password.map(|value| TicketPassword::from(value.into_boxed_str()));
-    tauri::async_runtime::spawn_blocking(move || file.save(&path, password))
-        .await
-        .map_err(fail)?
-        .map_err(fail)
+    node.save_share_file(&id, &path).await.map_err(fail)
+}
+
+/// Protect a share with a password, change it, or remove it (`None`).
+#[tauri::command]
+async fn set_share_password(
+    state: State<'_, AppState>,
+    id: String,
+    password: Option<String>,
+) -> CmdResult<ShareInfo> {
+    let node = state.node.clone();
+    node.set_share_password(&id, password).await.map_err(fail)
 }
 
 /// The share link as an SVG QR code, built from the current addresses.
 #[tauri::command]
 fn share_qr(state: State<'_, AppState>, id: String) -> CmdResult<String> {
     let share = state.node.share(&id).ok_or("unknown share")?;
-    let code = qrcode::QrCode::new(share.link.as_bytes()).map_err(fail)?;
+    // Medium error correction keeps the code small and still survives a glare or a smudge.
+    let code =
+        qrcode::QrCode::with_error_correction_level(share.link.as_bytes(), qrcode::EcLevel::M)
+            .map_err(fail)?;
     Ok(code
         .render::<qrcode::render::svg::Color>()
         .min_dimensions(200, 200)
@@ -206,16 +219,11 @@ fn share_qr(state: State<'_, AppState>, id: String) -> CmdResult<String> {
         .build())
 }
 
-/// Read a `.ferry` file opened from the desktop, picker, or drop handler. On phones the picker
-/// hands out `content://` URIs instead of paths.
+/// Read a `.ferry` file opened from the desktop, picker, or drop handler, and return its link.
+/// On phones the picker hands out `content://` URIs instead of paths.
 #[tauri::command]
 #[cfg_attr(desktop, allow(unused_variables))]
-async fn read_share_file(
-    app: AppHandle,
-    path: PathBuf,
-    password: Option<String>,
-) -> CmdResult<OpenedTicket> {
-    let password = password.map(|value| TicketPassword::from(value.into_boxed_str()));
+async fn read_share_file(app: AppHandle, path: PathBuf) -> CmdResult<String> {
     tauri::async_runtime::spawn_blocking(move || {
         #[cfg(mobile)]
         if let Some(url) = path
@@ -225,43 +233,44 @@ async fn read_share_file(
         {
             use tauri_plugin_fs::{FsExt, OpenOptions};
             let file = app.fs().open(url, OpenOptions::new()).map_err(fail)?;
-            return opened_ticket(TicketFile::read_from(file).map_err(fail)?, password);
+            let link = ferry_core::read_ticket_from(file).map_err(fail)?;
+            return Ok(link.to_url());
         }
-        read_share_file_checked(&path, password)
+        read_share_file_checked(&path)
     })
     .await
     .map_err(fail)?
 }
 
-fn read_share_file_checked(
-    path: &Path,
-    password: Option<TicketPassword>,
-) -> CmdResult<OpenedTicket> {
+fn read_share_file_checked(path: &Path) -> CmdResult<String> {
     if !has_ticket_extension(path) {
         return Err("That is not a Ferry ticket file (.ferry).".into());
     }
-    opened_ticket(TicketFile::read(path).map_err(fail)?, password)
+    Ok(ferry_core::read_ticket_file(path).map_err(fail)?.to_url())
 }
 
-fn opened_ticket(ticket: TicketFile, password: Option<TicketPassword>) -> CmdResult<OpenedTicket> {
-    let link = match (ticket, password) {
-        (TicketFile::Ready(link), None) => link,
-        (TicketFile::Protected(_), None) => return Ok(OpenedTicket::PasswordRequired),
-        (TicketFile::Protected(ticket), Some(password)) => ticket.unlock(password).map_err(fail)?,
-        (TicketFile::Ready(_), Some(_)) => {
-            return Err("The ticket file changed. Open it again.".into());
-        }
-    };
-    Ok(OpenedTicket::Ready {
-        link: link.to_url(),
-    })
-}
-
+/// What a link holds. A locked share answers with what the password prompt should say.
 #[tauri::command]
-async fn preview(state: State<'_, AppState>, link: String) -> CmdResult<Preview> {
+async fn preview(
+    state: State<'_, AppState>,
+    link: String,
+    password: Option<String>,
+) -> CmdResult<PreviewOutcome> {
     let node = state.node.clone();
     let link = ShareLink::parse(&link).map_err(fail)?;
-    node.preview(&link).await.map_err(fail)
+    match node.preview(&link, password).await {
+        Ok(preview) => Ok(PreviewOutcome::Ready { preview }),
+        Err(err) => match err.downcast_ref::<AccessError>() {
+            Some(AccessError::PasswordRequired) => Ok(PreviewOutcome::PasswordRequired),
+            Some(AccessError::WrongPassword) => Ok(PreviewOutcome::WrongPassword),
+            Some(AccessError::TooManyGuesses { retry_after_secs }) => {
+                Ok(PreviewOutcome::TooManyGuesses {
+                    retry_after_secs: *retry_after_secs,
+                })
+            }
+            None => Err(fail(err)),
+        },
+    }
 }
 
 #[tauri::command]
@@ -274,11 +283,14 @@ async fn start_download(
     state: State<'_, AppState>,
     link: String,
     dest: Option<PathBuf>,
+    password: Option<String>,
 ) -> CmdResult<DownloadInfo> {
     let node = state.node.clone();
     let dest = dest.unwrap_or_else(|| state.settings.lock().unwrap().download_dir.clone());
     let link = ShareLink::parse(&link).map_err(fail)?;
-    node.start_download(&link, dest).await.map_err(fail)
+    node.start_download(&link, password, dest)
+        .await
+        .map_err(fail)
 }
 
 #[tauri::command]
@@ -907,6 +919,7 @@ pub fn run() {
             create_share,
             remove_share,
             set_share_paused,
+            set_share_password,
             save_share_file,
             share_qr,
             read_share_file,
@@ -989,19 +1002,19 @@ mod tests {
 
     #[test]
     fn recognizes_links_and_share_files() {
-        assert_eq!(
-            link_from_arg("FERRY://get?t=abc"),
-            Some(IncomingShare::Link {
-                link: "FERRY://get?t=abc".into()
-            })
-        );
-        assert_eq!(
-            link_from_arg("https://ferry.xenvaultinteractive.com/get#abc"),
-            Some(IncomingShare::Link {
-                link: "https://ferry.xenvaultinteractive.com/get#abc".into()
-            })
-        );
-        assert!(link_from_arg("https://example.com/get#abc").is_none());
+        for link in [
+            "FERRY://s#abc",
+            "ferry://s/K7X2QP9A4MZT",
+            "https://ferry.xenvaultinteractive.com/s#abc",
+            "https://ferry.xenvaultinteractive.com/s/K7X2QP9A4MZT",
+        ] {
+            assert_eq!(
+                link_from_arg(link),
+                Some(IncomingShare::Link { link: link.into() })
+            );
+        }
+        assert!(link_from_arg("https://example.com/s#abc").is_none());
+        assert!(link_from_arg("https://ferry.xenvaultinteractive.com/get#abc").is_none());
         assert!(link_from_arg("--flag").is_none());
         let dir = tempfile_dir();
         let file = dir.join("x.ferry");
@@ -1013,7 +1026,7 @@ mod tests {
         let other = dir.join("x.txt");
         std::fs::write(&other, "secret").unwrap();
         assert!(link_from_arg(other.to_str().unwrap()).is_none());
-        assert!(read_share_file_checked(&other, None).is_err());
+        assert!(read_share_file_checked(&other).is_err());
     }
 
     #[test]

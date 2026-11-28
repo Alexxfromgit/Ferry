@@ -1,7 +1,7 @@
 <script lang="ts">
   import { save } from "@tauri-apps/plugin-dialog";
   import { api, message } from "./api";
-  import { bytes, duration, plural, shortId, shortPath } from "./format";
+  import { bytes, duration, formatCode, plural, shortPath } from "./format";
   import { copyLink, removeShare, sendLink, setSharing, shareAgain, statusLine } from "./shareActions";
   import ShareSwitch from "./ShareSwitch.svelte";
   import { app, isMobile, toast } from "./store.svelte";
@@ -91,17 +91,21 @@
 
   const spokes = [0, 45, 90, 135, 180, 225, 270, 315];
 
-  async function saveFile(password?: string) {
+  /** The shortest password a share accepts, not counting spaces at either end (as the engine
+   * counts it). */
+  const MIN_PASSWORD = 4;
+
+  async function saveFile() {
     const id = share.id;
     saving = true;
     try {
       const path = await save({
-        defaultPath: password === undefined ? `${share.name}.ferry` : "protected-ticket.ferry",
+        defaultPath: `${share.name}.ferry`,
         filters: [{ name: "Ferry ticket", extensions: ["ferry"] }],
       });
       if (!path) return;
-      await api.saveShareFile(id, path, password);
-      toast(password === undefined ? "Ticket file saved" : "Password-protected ticket saved");
+      await api.saveShareFile(id, path);
+      toast("Ticket file saved");
     } catch (err) {
       toast(`Couldn't save the ticket file: ${message(err)}`, true);
     } finally {
@@ -109,18 +113,36 @@
     }
   }
 
-  function saveProtected(event: SubmitEvent & { currentTarget: HTMLFormElement }) {
+  async function setPassword(password: string | null) {
+    saving = true;
+    try {
+      await api.setSharePassword(share.id, password);
+      toast(
+        password === null
+          ? `Anyone with the link can open ${share.name} again`
+          : `${share.name} now needs a password. Send it separately from the link.`,
+      );
+      passwordDialog?.close();
+    } catch (err) {
+      passwordProblem = message(err);
+    } finally {
+      saving = false;
+    }
+  }
+
+  function submitPassword(event: SubmitEvent & { currentTarget: HTMLFormElement }) {
     event.preventDefault();
     const values = new FormData(event.currentTarget);
     const password = values.get("password");
+    const repeated = values.get("confirmation");
     if (typeof password !== "string" || !password.trim()) {
       passwordProblem = "Enter a password.";
-    } else if (password !== values.get("confirmation")) {
+    } else if ([...password.trim()].length < MIN_PASSWORD) {
+      passwordProblem = `Use at least ${MIN_PASSWORD} characters.`;
+    } else if (password !== repeated) {
       passwordProblem = "Passwords do not match.";
     } else {
-      event.currentTarget.reset();
-      passwordDialog?.close();
-      void saveFile(password);
+      void setPassword(password);
     }
   }
 
@@ -144,7 +166,7 @@
       <header class="band">
         {@render helm(20)}
         <span class="line">Ferry</span>
-        <span class="kind">Ticket</span>
+        <span class="kind">{share.locked ? "Locked ticket" : "Ticket"}</span>
         <span class="state" class:on={live}>
           {#if paused}
             Off, not sharing
@@ -263,10 +285,10 @@
           {:else}
             <button class="t-main" onclick={() => copyLink(share)}>Copy link</button>
             <button class="t-line" onclick={() => void saveFile()} disabled={saving}>Save ticket file</button>
-            <button class="t-line" onclick={() => passwordDialog?.showModal()} disabled={saving}>
-              Save with password
-            </button>
           {/if}
+          <button class="t-line" onclick={() => passwordDialog?.showModal()} disabled={saving}>
+            {share.locked ? "Change password" : "Require a password"}
+          </button>
           <span class="end">
             <ShareSwitch on={!paused} label="Sharing {share.name}" onchange={(on) => setSharing(share, on)} />
             <button class="t-text" onclick={() => removeShare(share)}>Remove</button>
@@ -287,7 +309,7 @@
           {/if}
           {#if paused}<span class="qr-off">Sharing is off</span>{/if}
         </button>
-        <p class="number code" title={share.id}>No. {shortId(share.id)}</p>
+        <p class="number code" title="Share code">{formatCode(share.code)}</p>
         <svg
           class="barcode"
           viewBox="0 0 {barcode.width} 10"
@@ -306,27 +328,38 @@
 <dialog
   bind:this={passwordDialog}
   class="protect-dialog"
-  aria-label="Save a password-protected ticket"
+  aria-label="Password for this share"
   onclose={() => {
     passwordDialog?.querySelector("form")?.reset();
     passwordProblem = "";
   }}
 >
-  <form onsubmit={saveProtected}>
-    <h2>Save a password-protected ticket</h2>
-    <p class="muted">Use a strong passphrase and send it separately from the ticket file.</p>
-    <label>
-      Password
-      <input name="password" type="password" autocomplete="new-password" required />
-    </label>
-    <label>
-      Confirm password
-      <input name="confirmation" type="password" autocomplete="new-password" required />
-    </label>
+  <form onsubmit={submitPassword}>
+    <h2>{share.locked ? "Change the password" : "Require a password"}</h2>
+      <p class="muted">
+        Whoever opens the link, QR code or ticket file has to enter it first, and your Ferry
+        checks it. Send the password separately, for example by phone.
+        {#if share.locked}People who opened the share before need the new password.{/if}
+      </p>
+      <label>
+        Password
+        <input name="password" type="password" autocomplete="new-password" minlength={MIN_PASSWORD} required />
+      </label>
+      <label>
+        Confirm password
+        <input name="confirmation" type="password" autocomplete="new-password" required />
+      </label>
     {#if passwordProblem}<p role="alert">{passwordProblem}</p>{/if}
     <div class="protect-actions">
+      {#if share.locked}
+        <button class="quiet" type="button" onclick={() => setPassword(null)} disabled={saving}>
+          Remove password
+        </button>
+      {/if}
       <button class="quiet" type="button" onclick={() => passwordDialog?.close()}>Cancel</button>
-      <button class="primary" type="submit">Choose where to save</button>
+      <button class="primary" type="submit" disabled={saving}>
+        Set password
+      </button>
     </div>
   </form>
 </dialog>

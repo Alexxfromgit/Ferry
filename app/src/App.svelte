@@ -32,7 +32,7 @@
     if (app.dragging) return "drop";
     if (app.view === "send") return app.shares.length === 0 && !app.importing ? "hero" : "ambient";
     if (app.view === "receive") {
-      const busy = receive.preview || receive.problem || receive.protectedTicket;
+      const busy = receive.preview || receive.problem || receive.lockedLink;
       return app.downloads.length === 0 && !busy ? "hero" : "ambient";
     }
     return "ambient";

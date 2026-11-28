@@ -8,27 +8,32 @@ relay server does, and what to expect on difficult networks.
 
 - Every Ferry install has a permanent **device ID**: a public key, created on first start and
   stored in the app's data folder.
-- A share link (`https://ferry.xenvaultinteractive.com/get#…`), a `.ferry` ticket file and the QR
-  code all carry the same **ticket**: the sender's device ID, their last known addresses, and the
-  BLAKE3 hash of the shared files. The ticket sits after the `#`, which browsers never send to
-  the web server; the page there only hands the link to Ferry (`ferry://get?t=…`) or offers to
-  install it.
-- The recipient's Ferry connects to the sender's **device ID** using the addresses available.
-  It can use hole punching through home routers or an **encrypted relay** when needed.
-- Every byte is verified against the BLAKE3 hash while it arrives. Interrupted downloads resume
-  where they stopped.
+- A share link (`https://ferry.xenvaultinteractive.com/s#…`), a `.ferry` ticket file and the QR
+  code all carry the same two things: the sender's **device ID** and the share's **token**, a
+  random secret made for that share. They don't contain the sender's IP addresses or anything
+  about the files. The link data sits after the `#`, which browsers never send to the web
+  server; the page there only hands the link to Ferry (`ferry://s#…`) or offers to install it.
+- The recipient's Ferry connects to the sender's device ID, through hole punching or an
+  **encrypted relay**, and presents the token. The sender's Ferry checks it (and the share's
+  password, if it has one) before it serves anything. Without the token, knowing what is shared
+  gets nobody anything.
+- Every byte is verified against the share's BLAKE3 hash while it arrives. Interrupted downloads
+  resume where they stopped, without asking for the password again.
 
 Ferry is built on [iroh](https://iroh.computer) (QUIC connections dialed by public key) and
 `iroh-blobs` (content-addressed, verified, resumable transfers).
 
 ## Finding the sender
 
-1. The ticket contains the sender's addresses at the time the link was made.
-2. Addresses change, for example when a laptop moves to another Wi-Fi or a router gets a new IP.
-   So Ferry also publishes `device ID → current addresses` to n0's DNS service (pkarr) and looks
-   it up when dialing. Old links keep working as long as the sender's device ID stays the same.
-3. The record includes the sender's **home relay** when available. The recipient can use it
-   if both devices can reach the relay.
+1. Ferry publishes `device ID → home relay` to n0's DNS service (pkarr), and the recipient's
+   Ferry looks it up when dialing. The record holds only the relay's address, never the
+   device's IP addresses.
+2. The recipient reaches the sender through that relay, and the two devices then try to switch
+   to a direct connection.
+3. Links keep working as long as the sender's device ID stays the same, even after its IP
+   address changes.
+4. With **No relays**, there is nothing to look up, so links carry the sender's direct
+   addresses instead and work only while those are current.
 
 ## Direct vs. relay
 
@@ -76,17 +81,26 @@ use `https://that-name` in Ferry. Use an `iroh-relay` version matching the iroh 
 - **Shared files are served in place, not copied.** Don't move, rename or edit them while
   shared. If a file changes, recipients get a verification error; share it again to make a new
   ticket.
-- **A ticket works like a key.** Anyone who has the link can download while the share is
-  active. Send links privately and use "Stop sharing" when done. Stopping takes effect
-  immediately: new downloads are refused and downloads in progress are cut off. Your original
-  files are never deleted.
-- **A ticket contains your addresses.** Besides the device ID, a link includes the sender's
-  current IP addresses (local network and public) and home relay, so whoever sees the link
-  learns them. Your device ID and addresses are also published to n0's public DNS service so
-  links keep working when your IP changes; the files themselves and what you share are not
-  published anywhere.
-- **Discovery uses n0's DNS service.** If it's unreachable, links still work while the sender's
-  addresses in the ticket are current.
+- **A link works like a key.** Anyone who has the link can download while the share is
+  active, unless the share has a password. Send links privately and use "Stop sharing" when
+  done. Stopping takes effect immediately: new downloads are refused and downloads in progress
+  are cut off. Your original files are never deleted.
+- **A password locks the share itself.** With **Require a password**, the link, the QR code
+  and the ticket file all need the password, and your Ferry checks it. It only ever stores a
+  hash of the password. Each device gets a few guesses and then one every ten seconds, and all
+  devices together about 30 a minute; a right password doesn't count, so someone guessing
+  doesn't lock out the real recipient for long. Ticket files hold only the link data, never
+  anything that would let a password be tested offline. Devices that gave the password keep
+  access, so their downloads can resume, until you change the password or remove the share.
+  Use something that is hard to guess and send it separately from the link.
+- **Discovery uses n0's DNS service.** It holds your device ID and home relay, not your IP
+  addresses, the files or what you share. If it's unreachable, the recipient can't find you
+  unless both devices use the same relay or relays are off.
+- **Transfers are private, not anonymous.** While connecting, the two devices exchange their
+  addresses to try a direct connection, so each side can learn the other's IP address, even
+  when the download ends up going through a relay. Ferry doesn't show or log it, but network
+  tools on that device can see it. The relay in use sees both devices' IP addresses and how
+  much data passes, though not the data itself. To hide your IP address, use a VPN.
 - **Downloads need free space twice, briefly.** Received data first goes into Ferry's own
   storage (in the local app data folder) and is then moved to the chosen folder. On the same
   drive this is a quick move; on another drive it is a copy, so the system drive needs room for

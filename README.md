@@ -38,8 +38,9 @@ Every release lists its checksums in `SHA256SUMS.txt` and carries GitHub build a
 - **Works across networks.** Ferry connects directly when it can; when a network blocks that, an
   encrypted relay passes the data along without being able to read it.
 - **Resumes.** An interrupted download picks up where it stopped.
-- **Share it your way.** A link, a QR code, or a `.ferry` ticket file, optionally protected with a
-  password.
+- **Share it your way.** A link, a QR code, or a `.ferry` ticket file. Links name your device
+  and the share, never your IP address.
+- **Passwords.** Lock a share with a password; your Ferry checks it before anyone gets in.
 - **Phones too.** On Android, share to Ferry from any app's Share menu, scan a QR code to receive,
   and find received files in Downloads/Ferry.
 - **Stays current.** Signed in-app updates on Windows, macOS, the Linux AppImage and Android.
@@ -54,10 +55,11 @@ Every release lists its checksums in `SHA256SUMS.txt` and carries GitHub build a
    from your device, directly or through a relay. Keep Ferry running with sharing on until
    they finish.
 
-Treat tickets like passwords. Anyone with an active ticket can request the share, and the
-ticket includes the sender's device ID and network addresses. Ferry also publishes device
-address records through iroh's public discovery service so tickets keep working when a device
-changes networks. Turn sharing off to stop access. [How Ferry connects](docs/NETWORKING.md)
+Treat links like keys. Anyone with an active link can download the share unless it has a
+password. A link names the sender's device and a random token for the share; it carries no IP
+addresses (unless relays are turned off). Ferry publishes each device's home relay, not its IP
+addresses, through iroh's public discovery service so links keep working when a device changes
+networks. Turn sharing off to stop access. [How Ferry connects](docs/NETWORKING.md)
 
 ## Platforms
 
@@ -80,9 +82,9 @@ automatically or on demand.
    into **Receive**. Preview the share and select **Download**.
 4. On the sender's device, turn sharing off when you want to revoke access.
 
-**Save with password** encrypts a ticket file and its contents. Use a strong passphrase and
-send it separately. A link, QR code, or ordinary ticket for the same share still grants access
-on its own.
+**Require a password** locks the share: whoever opens its link, QR code or ticket file has to
+enter the password, and your Ferry checks it, so guesses can only be made online and slowly. Use
+something hard to guess and send it separately from the link.
 
 ### Command line
 
@@ -97,8 +99,9 @@ ferry status
 ```
 
 Keep the share command running until the transfer finishes. Run `ferry --help` for
-relay and data directory options. Add `--protect` to `share` to save an encrypted ticket;
-both `share` and `get` then prompt for the password without echoing it.
+relay and data directory options. Add `--password` to `share` to lock the share; `get` asks
+for the password when the sender wants one. Both prompt without echoing it, or read
+`FERRY_SHARE_PASSWORD` in scripts.
 
 ## Build from source
 

@@ -9,9 +9,12 @@ use std::{
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use ferry_core::{
-    Config, ConnectionKind, DownloadStatus, Event, Node, RelayChoice, SHARE_FILE_EXTENSION,
-    ShareLink, SkipReason, TicketFile, TicketPassword,
+    AccessError, Config, ConnectionKind, DownloadStatus, Event, Node, Preview, RelayChoice,
+    SHARE_FILE_EXTENSION, ShareLink, SkipReason, check_password, format_code, read_ticket_file,
 };
+
+/// Scripts can give the share password here instead of typing it.
+const PASSWORD_ENV: &str = "FERRY_SHARE_PASSWORD";
 
 #[derive(Parser)]
 #[command(version, about = "Share files peer-to-peer with Ferry")]
@@ -38,13 +41,14 @@ enum Command {
         /// Also write a .ferry share file to this path.
         #[arg(long)]
         save_file: Option<PathBuf>,
-        /// Prompt for a password to protect the saved ticket file.
-        #[arg(long, requires = "save_file")]
-        protect: bool,
+        /// Ask recipients for a password. Prompts for it, or reads FERRY_SHARE_PASSWORD.
+        #[arg(long)]
+        password: bool,
     },
     /// Keep serving all existing shares until Ctrl+C.
     Serve,
-    /// Download a share from a share link, a ticket, or a .ferry file.
+    /// Download a share from a share link, a short code, or a .ferry file. Prompts for the
+    /// password if the share has one (or reads FERRY_SHARE_PASSWORD).
     Get {
         link: String,
         /// Destination folder (default: current directory).
@@ -112,20 +116,25 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
         Command::Share {
             paths,
             save_file,
-            protect,
+            password,
         } => {
-            let password = if protect {
-                let password = rpassword::prompt_password("Ticket password: ")?;
-                anyhow::ensure!(!password.trim().is_empty(), "Enter a password");
-                let confirmation = rpassword::prompt_password("Confirm ticket password: ")?;
-                let matches = password == confirmation;
-                let password = TicketPassword::from(password.into_boxed_str());
-                drop(TicketPassword::from(confirmation.into_boxed_str()));
-                anyhow::ensure!(matches, "Passwords do not match");
-                Some(password)
+            let password = if password {
+                Some(match std::env::var(PASSWORD_ENV) {
+                    Ok(password) => password,
+                    Err(_) => {
+                        let password = prompt_password()?;
+                        let confirmation = rpassword::prompt_password("Confirm the password: ")?;
+                        anyhow::ensure!(password == confirmation, "Passwords do not match");
+                        password
+                    }
+                })
             } else {
                 None
             };
+            // Checked before anything is shared, so a bad password never leaves an open share.
+            if let Some(password) = &password {
+                check_password(password)?;
+            }
             let mut events = node.subscribe();
             let progress = tokio::spawn(async move {
                 while let Ok(event) = events.recv().await {
@@ -143,7 +152,8 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                     }
                 }
             });
-            let share = node.create_share(paths).await?;
+            // The password is set as the share is made, so it is never served without it.
+            let share = node.create_share_with_password(paths, password).await?;
             progress.abort();
             eprintln!();
             println!(
@@ -167,13 +177,13 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                 } else {
                     path
                 };
-                node.share_file(&share.id)?.save(&path, password)?;
+                node.save_share_file(&share.id, &path).await?;
                 println!("share file written to {}", path.display());
             }
-            if protect {
-                println!("Send the ticket file and share its password separately.");
-            } else {
-                println!("\nsend this link to the recipient:\n\n{}\n", share.link);
+            println!("\nsend this link to the recipient:\n\n{}\n", share.link);
+            println!("share code: {}", format_code(&share.code));
+            if share.locked {
+                println!("recipients need the password; send it separately.");
             }
             serve(node).await
         }
@@ -187,21 +197,14 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
         }
         Command::Get { link, dest, yes } => {
             let path = Path::new(&link);
+            let mut password = std::env::var(PASSWORD_ENV).ok();
             let link = if path.is_file() {
-                match TicketFile::read(path)? {
-                    TicketFile::Ready(link) => link,
-                    TicketFile::Protected(ticket) => {
-                        let password = rpassword::prompt_password("Ticket password: ").context(
-                            "Opening this ticket requires an interactive password prompt",
-                        )?;
-                        ticket.unlock(TicketPassword::from(password.into_boxed_str()))?
-                    }
-                }
+                read_ticket_file(path)?
             } else {
                 ShareLink::parse(&link)?
             };
             eprintln!("connecting to the sender...");
-            let preview = node.preview(&link).await?;
+            let preview = preview_with_password(node, &link, &mut password).await?;
             println!(
                 "\"{}\": {} file(s), {}{}",
                 preview.name,
@@ -223,7 +226,7 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                 None => std::env::current_dir()?,
             };
             let mut events = node.subscribe();
-            let started = node.start_download(&link, dest).await?;
+            let started = node.start_download(&link, password, dest).await?;
             loop {
                 let download = match events.recv().await {
                     Ok(Event::DownloadUpdated { download }) if download.id == started.id => {
@@ -263,11 +266,12 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
         Command::Shares => {
             for share in node.list_shares() {
                 println!(
-                    "{}  {}  ({} files, {})\n  {}",
+                    "{}  {}  ({} files, {}){}\n  {}",
                     share.id,
                     share.name,
                     share.file_count,
                     human(share.total_size),
+                    if share.locked { ", password" } else { "" },
                     share.link
                 );
             }
@@ -289,6 +293,42 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                 println!("direct:   {addr}");
             }
             Ok(())
+        }
+    }
+}
+
+/// Ask for the share password, only when someone can type it.
+fn prompt_password() -> anyhow::Result<String> {
+    use std::io::IsTerminal;
+    let hint = || format!("This share needs a password: type it, or set {PASSWORD_ENV}");
+    anyhow::ensure!(std::io::stdin().is_terminal(), hint());
+    rpassword::prompt_password("Share password: ").with_context(hint)
+}
+
+/// Preview a share, asking for its password (up to three times) if the sender wants one.
+async fn preview_with_password(
+    node: &Node,
+    link: &ShareLink,
+    password: &mut Option<String>,
+) -> anyhow::Result<Preview> {
+    let mut tries = 0;
+    loop {
+        let err = match node.preview(link, password.clone()).await {
+            Ok(preview) => return Ok(preview),
+            Err(err) => err,
+        };
+        let interactive = std::env::var(PASSWORD_ENV).is_err();
+        match err.downcast_ref::<AccessError>() {
+            Some(AccessError::PasswordRequired | AccessError::WrongPassword)
+                if interactive && tries < 3 =>
+            {
+                if password.is_some() {
+                    eprintln!("{err}");
+                }
+                tries += 1;
+                *password = Some(prompt_password()?);
+            }
+            _ => return Err(err),
         }
     }
 }

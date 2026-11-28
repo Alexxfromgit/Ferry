@@ -25,11 +25,16 @@ fn share(full: bool) -> ShareInfo {
         total_size: 42,
         created_at: 1_794_500_000,
         link: if full {
-            "https://ferry.xenvaultinteractive.com/get#blob".into()
+            "https://ferry.xenvaultinteractive.com/s#AQ".into()
         } else {
             String::new()
         },
-        ticket: if full { "blob".into() } else { String::new() },
+        code: if full {
+            "K7X2QP9A4MZT".into()
+        } else {
+            String::new()
+        },
+        locked: full,
         skipped: if full {
             [
                 SkipReason::SystemFile,
@@ -55,7 +60,7 @@ fn share(full: bool) -> ShareInfo {
 fn download(status: DownloadStatus, full: bool) -> DownloadInfo {
     DownloadInfo {
         id: "b8de".repeat(16),
-        ticket: "blob".into(),
+        link: "https://ferry.xenvaultinteractive.com/s#AQ".into(),
         dest_dir: PathBuf::from("/home/example/Downloads"),
         name: "Holiday".into(),
         status,

@@ -12,8 +12,9 @@ export const shares = [{
   "fileCount": 1,
   "totalSize": 42,
   "createdAt": 1794500000,
-  "link": "https://ferry.xenvaultinteractive.com/get#blob",
-  "ticket": "blob",
+  "link": "https://ferry.xenvaultinteractive.com/s#AQ",
+  "code": "K7X2QP9A4MZT",
+  "locked": true,
   "skipped": [
     {
       "name": "Holiday/x",
@@ -48,13 +49,14 @@ export const shares = [{
   "totalSize": 42,
   "createdAt": 1794500000,
   "link": "",
-  "ticket": ""
+  "code": "",
+  "locked": false
 }] satisfies ShareInfo[];
 
 export const downloads = [
   {
     "id": "b8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8de",
-    "ticket": "blob",
+    "link": "https://ferry.xenvaultinteractive.com/s#AQ",
     "destDir": "/home/example/Downloads",
     "name": "Holiday",
     "status": "connecting",
@@ -65,7 +67,7 @@ export const downloads = [
   },
   {
     "id": "b8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8de",
-    "ticket": "blob",
+    "link": "https://ferry.xenvaultinteractive.com/s#AQ",
     "destDir": "/home/example/Downloads",
     "name": "Holiday",
     "status": "downloading",
@@ -76,7 +78,7 @@ export const downloads = [
   },
   {
     "id": "b8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8de",
-    "ticket": "blob",
+    "link": "https://ferry.xenvaultinteractive.com/s#AQ",
     "destDir": "/home/example/Downloads",
     "name": "Holiday",
     "status": "exporting",
@@ -87,7 +89,7 @@ export const downloads = [
   },
   {
     "id": "b8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8de",
-    "ticket": "blob",
+    "link": "https://ferry.xenvaultinteractive.com/s#AQ",
     "destDir": "/home/example/Downloads",
     "name": "Holiday",
     "status": "completed",
@@ -98,7 +100,7 @@ export const downloads = [
   },
   {
     "id": "b8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8de",
-    "ticket": "blob",
+    "link": "https://ferry.xenvaultinteractive.com/s#AQ",
     "destDir": "/home/example/Downloads",
     "name": "Holiday",
     "status": "paused",
@@ -109,7 +111,7 @@ export const downloads = [
   },
   {
     "id": "b8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8de",
-    "ticket": "blob",
+    "link": "https://ferry.xenvaultinteractive.com/s#AQ",
     "destDir": "/home/example/Downloads",
     "name": "Holiday",
     "status": "failed",
@@ -120,7 +122,7 @@ export const downloads = [
   },
   {
     "id": "b8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8de",
-    "ticket": "blob",
+    "link": "https://ferry.xenvaultinteractive.com/s#AQ",
     "destDir": "/home/example/Downloads",
     "name": "Holiday",
     "status": "completed",
@@ -157,8 +159,9 @@ export const events = [
       "fileCount": 1,
       "totalSize": 42,
       "createdAt": 1794500000,
-      "link": "https://ferry.xenvaultinteractive.com/get#blob",
-      "ticket": "blob",
+      "link": "https://ferry.xenvaultinteractive.com/s#AQ",
+      "code": "K7X2QP9A4MZT",
+      "locked": true,
       "skipped": [
         {
           "name": "Holiday/x",
@@ -201,7 +204,8 @@ export const events = [
       "totalSize": 42,
       "createdAt": 1794500000,
       "link": "",
-      "ticket": ""
+      "code": "",
+      "locked": false
     }
   },
   {
@@ -230,7 +234,7 @@ export const events = [
     "type": "downloadUpdated",
     "download": {
       "id": "b8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8de",
-      "ticket": "blob",
+      "link": "https://ferry.xenvaultinteractive.com/s#AQ",
       "destDir": "/home/example/Downloads",
       "name": "Holiday",
       "status": "downloading",

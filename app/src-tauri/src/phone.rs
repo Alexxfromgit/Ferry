@@ -176,7 +176,7 @@ mod tests {
     fn download(done: u64, total: u64, status: DownloadStatus) -> DownloadInfo {
         DownloadInfo {
             id: String::new(),
-            ticket: String::new(),
+            link: String::new(),
             dest_dir: PathBuf::new(),
             name: "Trip".into(),
             status,

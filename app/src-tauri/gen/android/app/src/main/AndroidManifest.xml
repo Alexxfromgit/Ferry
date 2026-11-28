@@ -36,9 +36,9 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="https" />
                 <data android:host="ferry.xenvaultinteractive.com" />
+                <data android:path="/s" />
                 
-                
-                <data android:pathPrefix="/get" />
+                <data android:pathPrefix="/s/" />
                 
             </intent-filter>
             <intent-filter >
@@ -48,7 +48,7 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="ferry" />
-                <data android:host="get" />
+                <data android:host="s" />
                 
                 
                 

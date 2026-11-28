@@ -18,8 +18,9 @@ const shares: ShareInfo[] = [
     fileCount: 148,
     totalSize: 621_600_000,
     createdAt: now - 3600,
-    link: "https://ferry.xenvaultinteractive.com/get#blobaa5jnzjibhu5omj572hveqe33ruu5itl",
-    ticket: "blobaa5jnzjibhu5omj572hveqe33ruu5itl",
+    link: "https://ferry.xenvaultinteractive.com/s#AXbqm9jZ2Kc0eNhgEaQqWfH1aE3qB5JbXy7Yk2LmfaPbaQ",
+    code: "K7X2QP9A4MZT",
+    locked: false,
     skipped: [
       { name: "Holiday in Lisbon/.DS_Store", reason: "systemFile" },
       { name: "Holiday in Lisbon/Edits (old)", reason: "emptyFolder" },
@@ -34,8 +35,9 @@ const shares: ShareInfo[] = [
     fileCount: 1,
     totalSize: 2_340_000,
     createdAt: now - 86400 * 2,
-    link: "https://ferry.xenvaultinteractive.com/get#blobaafakesecond",
-    ticket: "blobaafakesecond",
+    link: "https://ferry.xenvaultinteractive.com/s#AXbqm9jZ2Kc0eNhgEaQqWfH1aE3qB5JbXy7Yk2LmfaPbbQ",
+    code: "6N76Y6BE0EQX",
+    locked: true,
   },
   {
     id: hex(8),
@@ -44,8 +46,9 @@ const shares: ShareInfo[] = [
     fileCount: 12,
     totalSize: 838_000_000,
     createdAt: now - 86400 * 9,
-    link: "https://ferry.xenvaultinteractive.com/get#blobaafakethird",
-    ticket: "blobaafakethird",
+    link: "https://ferry.xenvaultinteractive.com/s#AXbqm9jZ2Kc0eNhgEaQqWfH1aE3qB5JbXy7Yk2LmfaPbcQ",
+    code: "Q3M8D2TW7HRA",
+    locked: false,
     paused: true,
   },
   ...Array.from({ length: 8 }, (_, i): ShareInfo => ({
@@ -55,28 +58,29 @@ const shares: ShareInfo[] = [
     fileCount: 1,
     totalSize: 1_200_000 + i * 310_000,
     createdAt: now - 86400 * (10 + i),
-    link: `https://ferry.xenvaultinteractive.com/get#blobaafake${i}`,
-    ticket: `blobaafake${i}`,
+    link: `https://ferry.xenvaultinteractive.com/s#AXbqm9jZ2Kc0eNhgEaQqWfH1aE3qB5JbXy7Yk2Lmf${i}`,
+    code: `SCAN${String(i).padStart(4, "0")}A1B2`,
+    locked: false,
   })),
 ];
 
 const downloads: DownloadInfo[] = [
   {
-    id: hex(3), ticket: "", destDir: "C:\\Users\\alex\\Downloads", name: "Wedding video", status: "downloading",
+    id: hex(3), link: "", destDir: "C:\\Users\\alex\\Downloads", name: "Wedding video", status: "downloading",
     doneBytes: 1_830_000_000, totalBytes: 4_100_000_000, createdAt: now, bytesPerSec: 6_400_000, etaSecs: 355,
     connection: "relay",
   },
   {
-    id: hex(4), ticket: "", destDir: "C:\\Users\\alex\\Downloads", name: "Band rehearsal", status: "paused",
+    id: hex(4), link: "", destDir: "C:\\Users\\alex\\Downloads", name: "Band rehearsal", status: "paused",
     doneBytes: 310_000_000, totalBytes: 890_000_000, createdAt: now - 500, bytesPerSec: 0,
   },
   {
-    id: hex(5), ticket: "", destDir: "C:\\Users\\alex\\Downloads", name: "Recipes", status: "completed",
+    id: hex(5), link: "", destDir: "C:\\Users\\alex\\Downloads", name: "Recipes", status: "completed",
     doneBytes: 12_000_000, totalBytes: 12_000_000, createdAt: now - 4000, bytesPerSec: 0,
     savedPath: "C:\\Users\\alex\\Downloads\\Recipes",
   },
   {
-    id: hex(6), ticket: "", destDir: "C:\\Users\\alex\\Downloads", name: "Old photos", status: "failed",
+    id: hex(6), link: "", destDir: "C:\\Users\\alex\\Downloads", name: "Old photos", status: "failed",
     doneBytes: 0, totalBytes: 0, createdAt: now - 9000, bytesPerSec: 0,
     error: "could not reach the sender (is their Ferry running?)",
   },
@@ -193,8 +197,16 @@ export function installDevPreview() {
           return { version, support: "unavailable", autoCheck: true, readyVersion: null };
         case "take_pending_links":
           return [];
+        case "set_share_password": {
+          const share = shares.find((s) => s.id === (args as { id: string }).id)!;
+          share.locked = (args as { password: string | null }).password !== null;
+          void emit("ferry-event", { type: "shareUpdated", share });
+          return share;
+        }
         case "preview":
           return {
+            kind: "ready",
+            preview: {
             id: hex(7),
             name: "Concert photos",
             files: [
@@ -205,6 +217,7 @@ export function installDevPreview() {
             fileCount: 3,
             totalSize: 191_900_000,
             connection: "direct",
+            },
           };
         default:
           return null;
