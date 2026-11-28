@@ -177,6 +177,7 @@ mod tests {
         DownloadInfo {
             id: String::new(),
             link: String::new(),
+            relay: None,
             dest_dir: PathBuf::new(),
             name: "Trip".into(),
             status,

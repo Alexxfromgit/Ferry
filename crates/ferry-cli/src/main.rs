@@ -28,7 +28,8 @@ struct Cli {
     #[arg(long, global = true, default_value = "default")]
     relay: String,
 
-    /// Don't use Ferry's link service: share full links only, and don't open short ones.
+    /// Share full links only, and don't open short ones. Ferry still asks its link service to
+    /// remove short links it registered before, when their shares are removed.
     #[arg(long, global = true)]
     no_short_links: bool,
 
@@ -101,9 +102,7 @@ async fn main() -> anyhow::Result<()> {
     relay.validate()?;
     let mut config = Config::new(data_dir);
     config.relay = relay.clone();
-    if cli.no_short_links {
-        config.links_service = None;
-    }
+    config.short_links = !cli.no_short_links;
     config.hide_ip = cli.hide_ip;
     // A one-shot tool should not quietly continue old downloads in the background.
     config.resume_downloads = false;
@@ -165,22 +164,10 @@ async fn run(node: &Node, command: Command) -> anyhow::Result<()> {
                     }
                 }
             });
-            let mut share = node.create_share(paths).await?;
+            // The password is set as the share is made, so it is never served without it.
+            let mut share = node.create_share_with_password(paths, password).await?;
             progress.abort();
             eprintln!();
-            if let Some(password) = &password {
-                match node
-                    .set_share_password(&share.id, Some(password.clone()))
-                    .await
-                {
-                    Ok(locked) => share = locked,
-                    Err(e) => {
-                        // Never leave the share open when it was meant to be locked.
-                        node.remove_share(&share.id).await.ok();
-                        return Err(e.context("the share was not locked, so it was removed"));
-                    }
-                }
-            }
             println!(
                 "sharing \"{}\": {} file(s), {}",
                 share.name,

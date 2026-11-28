@@ -805,9 +805,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = Config::new(node_dir(app)?);
     config.relay = settings.relay.clone();
-    if !settings.short_links {
-        config.links_service = None;
-    }
+    // With short links off, the link service is only asked to remove codes registered before.
+    config.short_links = settings.short_links;
     // Settings saved by hand could ask for both; relays win, so Ferry still starts.
     config.hide_ip = settings.hide_ip && settings.relay != RelayChoice::Disabled;
     let node = match tauri::async_runtime::block_on(Node::start(config)) {

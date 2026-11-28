@@ -240,10 +240,13 @@ impl ShareLink {
         } else {
             bail!("this is not a Ferry link");
         };
-        // `rest` starts right after `s`: `/<CODE>`, `#<payload>` or `/#<payload>`.
+        // `rest` starts right after `s`: `/<CODE>`, `#<payload>` or `/#<payload>`, and either may
+        // have picked up a query on the way (`?utm_source=chat`), which is ignored.
         let rest = rest.strip_prefix('/').unwrap_or(rest);
-        if let Some(payload) = rest.strip_prefix('#') {
-            let payload = payload.trim();
+        let (path, fragment) = rest.split_once('#').unwrap_or((rest, ""));
+        let code = path.split('?').next().unwrap_or_default();
+        if code.is_empty() {
+            let payload = fragment.trim();
             ensure!(!payload.is_empty(), "this link is incomplete");
             let bytes = BASE64URL_NOPAD
                 .decode(payload.as_bytes())
@@ -251,8 +254,6 @@ impl ShareLink {
                 .context("this link is damaged")?;
             return Self::from_bytes(&bytes);
         }
-        let code = rest.split(['?', '#']).next().unwrap_or_default();
-        ensure!(!code.is_empty(), "this link is incomplete");
         normalize_code(code)
             .map(Self::Code)
             .context("this link is damaged")
@@ -386,6 +387,15 @@ mod tests {
                 "https://FERRY.xenvaultinteractive.com./s#{}",
                 link.payload()
             ),
+            // A query added when the link was forwarded doesn't get in the way.
+            format!(
+                "https://ferry.xenvaultinteractive.com/s?utm_source=chat#{}",
+                link.payload()
+            ),
+            format!(
+                "https://ferry.xenvaultinteractive.com/s/?x=1&y=2#{}",
+                link.payload()
+            ),
         ] {
             assert_eq!(ShareLink::parse(&input).unwrap(), link, "{input}");
         }
@@ -403,6 +413,8 @@ mod tests {
             link.to_app_url(),
             "https://ferry.xenvaultinteractive.com/S/k7x2-qp9a-4mzt".into(),
             "HTTPS://FERRY.XENVAULTINTERACTIVE.COM/S/K7X2QP9A4MZT".into(),
+            "https://ferry.xenvaultinteractive.com/s/K7X2QP9A4MZT?utm_source=chat".into(),
+            "https://ferry.xenvaultinteractive.com/s/K7X2QP9A4MZT#anything".into(),
             "k7x2-qp9a-4mzt".into(),
         ] {
             assert_eq!(ShareLink::parse(&input).unwrap(), link, "{input}");
@@ -453,6 +465,8 @@ mod tests {
             "https://ferry.xenvaultinteractive.com/s",
             "https://ferry.xenvaultinteractive.com/s/TOO-SHORT",
             "https://ferry.xenvaultinteractive.com/s#AAAA",
+            "https://ferry.xenvaultinteractive.com/s?only=query",
+            "https://ferry.xenvaultinteractive.com/s?x=1#",
             "K7X2QP9A4MZU", // U is not Crockford
         ] {
             assert!(ShareLink::parse(bad).is_err(), "{bad}");

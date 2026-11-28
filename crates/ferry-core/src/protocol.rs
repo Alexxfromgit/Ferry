@@ -22,6 +22,8 @@ use crate::link::ShareToken;
 pub const ALPN: &[u8] = b"ferry/1";
 /// Requests and answers are tiny; anything larger is not a Ferry peer.
 const MAX_MESSAGE: usize = 4 * 1024;
+// The longest password a share takes must fit in one request, with the token and framing.
+const _: () = assert!(crate::access::MAX_PASSWORD_BYTES + 256 <= MAX_MESSAGE);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 /// Requests one connection may make before it is closed (each guess needs a new one).
 const MAX_REQUESTS_PER_CONNECTION: usize = 8;
