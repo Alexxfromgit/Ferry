@@ -433,3 +433,100 @@ async fn a_registration_about_to_run_out_falls_back_to_the_full_link() {
     assert!(updated.link.contains("/s#"), "{}", updated.link);
     sender.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removal_the_service_keeps_refusing_doesnt_hold_back_the_others() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mock = MockService::default();
+    let base = mock.start().await;
+    let book = MemoryLookup::new();
+    let sender = node_with(&tmp.path().join("sender"), Some(&base), &book).await;
+    let stuck = sender
+        .create_share(vec![sample(tmp.path(), "stuck.txt")])
+        .await
+        .unwrap();
+    let other = sender
+        .create_share(vec![sample(tmp.path(), "other.txt")])
+        .await
+        .unwrap();
+    wait_until("both registered", || mock.links.lock().unwrap().len() == 2).await;
+
+    // The first one queued is refused for good (as after a device key was reset); the one
+    // queued after it still goes.
+    mock.refuse_removal
+        .lock()
+        .unwrap()
+        .insert(stuck.code.clone());
+    sender.remove_share(&stuck.id).await.unwrap();
+    sender.remove_share(&other.id).await.unwrap();
+    // Checked in the node: the service drops a code before its answer reaches Ferry.
+    wait_until("only the refused removal is left", || {
+        sender.inner.registry.lock().unwrap().link_removals == vec![stuck.code.clone()]
+    })
+    .await;
+    assert!(!mock.links.lock().unwrap().contains_key(&other.code));
+    assert!(mock.links.lock().unwrap().contains_key(&stuck.code));
+    sender.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_relays_codes_are_taken_off_the_service_once_and_come_back_with_relays() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mock = MockService::default();
+    let base = mock.start().await;
+    let book = MemoryLookup::new();
+    let dir = tmp.path().join("sender");
+    let without_relays = || {
+        let mut config = Config::local_only(&dir);
+        config.links_service = Some(base.clone());
+        config
+    };
+
+    let sender = node_with(&dir, Some(&base), &book).await;
+    for name in ["a.txt", "b.txt"] {
+        sender
+            .create_share(vec![sample(tmp.path(), name)])
+            .await
+            .unwrap();
+    }
+    wait_until("both registered", || mock.links.lock().unwrap().len() == 2).await;
+    sender.shutdown().await.unwrap();
+    drop(sender);
+
+    // Started without relays: short links can't lead here, so the codes come off.
+    let sender = Node::start(without_relays()).await.unwrap();
+    wait_until("both removed", || mock.links.lock().unwrap().is_empty()).await;
+    wait_until("nothing left to send", || {
+        sender
+            .inner
+            .registry
+            .lock()
+            .unwrap()
+            .link_removals
+            .is_empty()
+    })
+    .await;
+    assert!(sender.inner.registry.lock().unwrap().links_withdrawn);
+    sender.shutdown().await.unwrap();
+    drop(sender);
+
+    // Started without relays again: they were taken off already, so nothing is sent.
+    let writes = mock.writes.lock().unwrap().len();
+    let sender = Node::start(without_relays()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(mock.writes.lock().unwrap().len(), writes, "no requests");
+    sender.shutdown().await.unwrap();
+    drop(sender);
+
+    // With relays again, both are registered again.
+    let sender = node_with(&dir, Some(&base), &book).await;
+    wait_until("both registered again", || {
+        mock.links.lock().unwrap().len() == 2
+    })
+    .await;
+    wait_until("no longer marked as taken off", || {
+        !sender.inner.registry.lock().unwrap().links_withdrawn
+    })
+    .await;
+    sender.shutdown().await.unwrap();
+}

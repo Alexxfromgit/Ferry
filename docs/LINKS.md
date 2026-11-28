@@ -111,7 +111,9 @@ If that matters to you, turn short links off and send full links instead. Turnin
 Settings also removes your existing short links from the service. Removals, also of shares
 you remove, are kept until the service confirms them: if it can't be reached, or Ferry quits
 first, they are sent on the next start, even with short links off. That is the only thing
-Ferry asks the service while short links are off.
+Ferry asks the service while short links are off. The same goes for relays: started without
+them, Ferry takes its shares' codes off the service once, since they couldn't lead to it, and
+registers them again the next time it starts with relays.
 
 A code works like the link it stands for: whoever has it can ask the sender for the share.
 Locking the share with a password protects it in every form, as

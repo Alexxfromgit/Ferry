@@ -152,6 +152,10 @@ pub struct Registry {
     /// shares when short links were turned off), kept until the service confirms.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub link_removals: Vec<String>,
+    /// The shares' codes were taken off the link service because relays were turned off, and
+    /// none has been registered since. Saves sending those removals on every start.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub links_withdrawn: bool,
 }
 
 /// The secrets that guard one share.
@@ -473,6 +477,7 @@ mod size_probe {
             downloads: Vec::new(),
             access: BTreeMap::new(),
             link_removals: Vec::new(),
+            links_withdrawn: false,
         };
         let dir = tempfile::tempdir().unwrap();
         let lists = FileLists::new(dir.path().join("shares"));

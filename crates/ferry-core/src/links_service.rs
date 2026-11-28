@@ -315,6 +315,9 @@ pub(crate) mod tests {
         pub down: Arc<Mutex<bool>>,
         /// Codes whose registration is always refused (409).
         pub refuse: Arc<Mutex<std::collections::HashSet<String>>>,
+        /// Codes whose removal is always refused (403), as for a code registered with another
+        /// device key.
+        pub refuse_removal: Arc<Mutex<std::collections::HashSet<String>>>,
         /// When each registration or removal arrived.
         pub writes: Arc<Mutex<Vec<std::time::Instant>>>,
     }
@@ -386,6 +389,12 @@ pub(crate) mod tests {
                 }
                 if method == "PUT" && self.refuse.lock().unwrap().contains(&code) {
                     return (409, r#"{"error":"taken"}"#.into());
+                }
+                if method == "DELETE" && self.refuse_removal.lock().unwrap().contains(&code) {
+                    return (
+                        403,
+                        r#"{"error":"This link belongs to another device."}"#.into(),
+                    );
                 }
             }
             match method {

@@ -21,6 +21,40 @@ pub fn write_atomic_private(path: &Path, data: &[u8]) -> anyhow::Result<()> {
     write_atomic_inner(path, data, true)
 }
 
+/// Make an existing file readable only by the current user, as [`write_atomic_private`] writes
+/// files, if it isn't already: files written by older versions of Ferry (or copied in) may be
+/// open to others. `data` must be the file's contents; on Windows the file is written again
+/// with them, atomically, to get the access list. Returns whether anything changed.
+pub fn make_private(path: &Path, data: &[u8]) -> anyhow::Result<bool> {
+    #[cfg(unix)]
+    {
+        let _ = data;
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)?.permissions().mode();
+        if mode & 0o077 == 0 {
+            return Ok(false);
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("restricting {}", path.display()))?;
+        Ok(true)
+    }
+    #[cfg(windows)]
+    {
+        let current = windows_private::access_list(path)
+            .with_context(|| format!("reading the permissions of {}", path.display()))?;
+        if current == windows_private::canonical(&windows_private::descriptor()?)? {
+            return Ok(false);
+        }
+        write_atomic_private(path, data)?;
+        Ok(true)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, data);
+        Ok(false)
+    }
+}
+
 fn write_atomic_inner(path: &Path, data: &[u8], private: bool) -> anyhow::Result<()> {
     let dir = path
         .parent()
@@ -184,7 +218,6 @@ mod windows_private {
     }
 
     /// The access list of a file, in SDDL.
-    #[cfg(test)]
     pub(super) fn access_list(path: &Path) -> io::Result<String> {
         use windows_sys::Win32::Security::{
             ACL,
@@ -216,8 +249,7 @@ mod windows_private {
     }
 
     /// `sddl` as Windows writes it back: well-known accounts by their aliases (the built-in
-    /// administrator as `LA`, say), so access lists can be compared whoever runs the test.
-    #[cfg(test)]
+    /// administrator as `LA`, say), so access lists can be compared whoever runs Ferry.
     pub(super) fn canonical(sddl: &str) -> io::Result<String> {
         let sddl = wide(OsStr::new(sddl));
         // SAFETY: the descriptor is made and freed here.
@@ -242,7 +274,6 @@ mod windows_private {
     ///
     /// # Safety
     /// `sd` must be a valid security descriptor.
-    #[cfg(test)]
     unsafe fn dacl_text(sd: PSECURITY_DESCRIPTOR) -> io::Result<String> {
         use windows_sys::Win32::Security::{
             Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW,
@@ -525,6 +556,47 @@ mod tests {
         write_atomic(&path, b"two").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"two");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn files_written_before_are_made_private_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.key");
+        write_atomic(&path, b"same bytes").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        assert!(
+            make_private(&path, b"same bytes").unwrap(),
+            "open to others before"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"same bytes",
+            "the contents stay"
+        );
+        assert!(
+            !make_private(&path, b"same bytes").unwrap(),
+            "nothing more to do"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            windows_private::access_list(&path).unwrap(),
+            windows_private::canonical(&windows_private::descriptor().unwrap()).unwrap()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no temp files left"
+        );
     }
 
     /// What tripped the first version of the test above on CI: an account Windows has an
