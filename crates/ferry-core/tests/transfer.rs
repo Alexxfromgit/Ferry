@@ -193,8 +193,10 @@ async fn relative_destination_is_resolved_up_front() {
     let link = ShareLink::parse(&share.link).unwrap();
 
     // Relative to the current directory, like `ferry get … -d downloads`.
+    // A folder of this run's own, so test runs sharing a directory don't clash.
     let cwd = std::env::current_dir().unwrap();
-    let relative = Path::new("target-ferry-test-relative").join(&share.id[..8]);
+    let top = format!("target-ferry-test-relative-{}", std::process::id());
+    let relative = Path::new(&top).join(&share.id[..8]);
     let started = receiver
         .start_download(&link, None, relative.clone())
         .await
@@ -206,7 +208,7 @@ async fn relative_destination_is_resolved_up_front() {
         std::fs::read(cwd.join(&relative).join("doc.txt")).unwrap(),
         b"relative"
     );
-    std::fs::remove_dir_all(cwd.join("target-ferry-test-relative")).ok();
+    std::fs::remove_dir_all(cwd.join(&top)).ok();
 
     sender.shutdown().await.unwrap();
     receiver.shutdown().await.unwrap();
@@ -858,10 +860,13 @@ async fn locked_shares_need_their_password() {
     let err = receiver.preview(&link, None).await.unwrap_err();
     assert_eq!(access(err), Some(AccessError::PasswordRequired));
 
-    // Guessing is slowed down: after a burst of wrong passwords this device waits, even with
-    // the right one, but another device with the right password still gets in.
+    // Guessing is slowed down: after a burst of wrong passwords this device has to wait, but
+    // another device with the right password still gets in. Each guess let through is checked
+    // (slowly, on purpose) and guesses come back over time, so on a slow machine the limit may
+    // take a few more tries to reach; that the right password waits too, and how long, is
+    // checked without a clock in `node::tests::access`.
     let mut limited = false;
-    for _ in 0..10 {
+    for _ in 0..40 {
         let err = receiver
             .preview(&link, Some("wrong".into()))
             .await
@@ -873,14 +878,6 @@ async fn locked_shares_need_their_password() {
         }
     }
     assert!(limited, "guesses must be limited");
-    let err = receiver
-        .preview(&link, Some("spring tide".into()))
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        access(err),
-        Some(AccessError::TooManyGuesses { .. })
-    ));
     let other = node(&tmp.path().join("other")).await;
     other
         .preview(&link, Some("spring tide".into()))
