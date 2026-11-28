@@ -1675,6 +1675,7 @@ fn dunce_canonicalize(path: &Path) -> anyhow::Result<PathBuf> {
 mod tests {
     use super::*;
 
+    mod access;
     mod resume;
 
     #[test]
