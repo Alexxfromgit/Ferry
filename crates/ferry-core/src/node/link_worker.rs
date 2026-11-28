@@ -55,8 +55,9 @@ pub(super) struct LinkState {
     pub(in crate::node) registered: HashMap<String, u64>,
     /// Shares to register: when, and the wait after the last failure, if it failed.
     pub(in crate::node) due: HashMap<String, Due>,
-    /// After a failed removal: when to try again, and how long that wait was.
-    removal_retry: Option<(Instant, Duration)>,
+    /// Removals that failed: code → when to try again, and how long that wait was. Each code
+    /// waits on its own, so one the service keeps refusing doesn't hold back the others.
+    removal_retry: HashMap<String, (Instant, Duration)>,
     /// When each request was sent (tests check the pacing on these).
     #[cfg(test)]
     pub(in crate::node) sent: Vec<Instant>,
@@ -161,19 +162,25 @@ impl Node {
                 .map(|(id, access)| (id.clone(), crate::link::share_code(&me, &access.token)))
                 .collect();
             if on {
-                // Codes of current shares are registered again rather than removed.
-                registry
-                    .link_removals
-                    .retain(|code| !codes.iter().any(|(_, c)| c == code));
-                let now = Instant::now();
-                for (id, _) in &codes {
-                    state.due.insert(
-                        id.clone(),
-                        Due {
-                            at: now,
-                            backoff: None,
-                        },
-                    );
+                // Without relays short links can't be used, and codes taken off the service
+                // for that stay queued; the next start with relays registers them again.
+                if !self.links_need_addresses() {
+                    // Codes of current shares are registered again rather than removed.
+                    registry
+                        .link_removals
+                        .retain(|code| !codes.iter().any(|(_, c)| c == code));
+                    let left = &registry.link_removals;
+                    state.removal_retry.retain(|code, _| left.contains(code));
+                    let now = Instant::now();
+                    for (id, _) in &codes {
+                        state.due.insert(
+                            id.clone(),
+                            Due {
+                                at: now,
+                                backoff: None,
+                            },
+                        );
+                    }
                 }
                 Vec::new()
             } else {
@@ -201,7 +208,39 @@ impl Node {
         if self.inner.links.is_none() {
             return;
         }
-        if self.short_links_on() {
+        let usable = self.short_links_on();
+        let withdraw = !self.inner.links_off.load(Ordering::SeqCst) && !usable;
+        let changed = {
+            let mut registry = self.inner.registry.lock().unwrap();
+            let me = self.endpoint().id();
+            let codes: Vec<String> = registry
+                .access
+                .values()
+                .map(|access| crate::link::share_code(&me, &access.token))
+                .collect();
+            if usable {
+                // Codes still queued from a time without relays are registered again instead.
+                let before = registry.link_removals.len();
+                registry.link_removals.retain(|code| !codes.contains(code));
+                registry.link_removals.len() != before
+            } else if withdraw && !registry.links_withdrawn {
+                // Relays are off, so short links can't lead to this device: take the codes off
+                // the service (once), rather than leave them there until they expire.
+                for code in codes {
+                    if !registry.link_removals.contains(&code) {
+                        registry.link_removals.push(code);
+                    }
+                }
+                registry.links_withdrawn = true;
+                true
+            } else {
+                false
+            }
+        };
+        if changed {
+            self.persist();
+        }
+        if usable {
             let ids: Vec<String> = self
                 .inner
                 .registry
@@ -270,18 +309,12 @@ impl Node {
         let mut wait: Option<Duration> = None;
         let mut sooner = |d: Duration| wait = Some(wait.map_or(d, |w| w.min(d)));
         // The registry is locked before the link state, as everywhere else.
-        let removal = self
-            .inner
-            .registry
-            .lock()
-            .unwrap()
-            .link_removals
-            .first()
-            .cloned();
+        let removals = self.inner.registry.lock().unwrap().link_removals.clone();
         let state = self.inner.link_state.lock().unwrap();
-        if let Some(code) = removal {
-            match state.removal_retry {
-                Some((at, _)) if at > now => sooner(at - now),
+        // The first removal that isn't waiting after a failure, in the order they were queued.
+        for code in removals {
+            match state.removal_retry.get(&code) {
+                Some((at, _)) if *at > now => sooner(*at - now),
                 _ => return Ok(Job::Remove(code)),
             }
         }
@@ -310,20 +343,27 @@ impl Node {
         let result = service.delete(&secret, &code, util::now_unix()).await;
         match result {
             Ok(()) => {
-                self.inner.link_state.lock().unwrap().removal_retry = None;
                 self.inner
                     .registry
                     .lock()
                     .unwrap()
                     .link_removals
                     .retain(|c| *c != code);
+                self.inner
+                    .link_state
+                    .lock()
+                    .unwrap()
+                    .removal_retry
+                    .remove(&code);
                 self.persist();
             }
             Err(e) => {
                 tracing::warn!("could not remove a short link: {e:#}");
                 let mut state = self.inner.link_state.lock().unwrap();
-                let wait = next_backoff(state.removal_retry.map(|(_, w)| w));
-                state.removal_retry = Some((Instant::now() + wait, wait));
+                let wait = next_backoff(state.removal_retry.get(&code).map(|(_, w)| *w));
+                state
+                    .removal_retry
+                    .insert(code, (Instant::now() + wait, wait));
             }
         }
     }
@@ -371,12 +411,15 @@ impl Node {
         };
         // The share may have been removed, or short links turned off, while this was under way.
         // Checked under the registry lock, which those changes take too.
+        let mut save = false;
         let newly = {
             let mut registry = self.inner.registry.lock().unwrap();
             let still_wanted = registry.access.get(&id).is_some_and(|a| a.token == token)
                 && !self.inner.links_off.load(Ordering::SeqCst);
             let mut state = self.inner.link_state.lock().unwrap();
             if still_wanted {
+                // A code is on the service again: the next start without relays takes them off.
+                save = std::mem::take(&mut registry.links_withdrawn);
                 state.due.insert(
                     id.clone(),
                     Due {
@@ -401,7 +444,10 @@ impl Node {
                 }
             }
             Some(false) => {}
-            None => self.persist(),
+            None => save = true,
+        }
+        if save {
+            self.persist();
         }
     }
 }
