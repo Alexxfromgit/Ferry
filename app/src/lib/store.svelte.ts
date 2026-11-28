@@ -47,7 +47,7 @@ export const app = $state({
   /** Set once the startup intro has had its minimum time; it stays up while init runs on. */
   introDone: false,
   /** Mirrors the saved setting, so the backdrop can follow it without reloading settings.
-   *  Null until it has loaded, so artwork never shows to someone who turned it off. */
+   *  Null until it has loaded; artwork shows only once the saved setting turns it on. */
   showArtwork: null as boolean | null,
   toast: null as { text: string; error: boolean } | null,
   /** Bumped when share links may have changed (e.g. the relay connected); QR codes refetch. */
@@ -324,12 +324,12 @@ async function refreshStatus() {
   }
 }
 
-/** Loads the artwork setting. If settings can't be read, the default (on) applies. */
+/** Loads the artwork setting. If settings can't be read, the default (off) applies. */
 async function loadArtworkSetting() {
   try {
     app.showArtwork = (await api.getSettings()).showArtwork;
   } catch {
-    app.showArtwork = true;
+    app.showArtwork = false;
   }
 }
 

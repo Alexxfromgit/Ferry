@@ -49,16 +49,13 @@ struct Settings {
     close_to_tray: bool,
     #[serde(default = "default_auto_check_updates")]
     auto_check_updates: bool,
-    /// Show the mascot artwork behind the UI. Missing from settings saved before it existed.
-    #[serde(default = "yes")]
+    /// Show the mascot artwork behind the UI. Off unless turned on; missing from settings saved
+    /// before it existed.
+    #[serde(default)]
     show_artwork: bool,
 }
 
 fn default_auto_check_updates() -> bool {
-    true
-}
-
-fn yes() -> bool {
     true
 }
 
@@ -98,7 +95,7 @@ fn load_settings(path: &Path, default_download_dir: PathBuf) -> Settings {
         relay: RelayChoice::Default,
         close_to_tray: true,
         auto_check_updates: default_auto_check_updates(),
-        show_artwork: true,
+        show_artwork: false,
     };
     let Some(mut settings) = std::fs::read(path)
         .ok()
@@ -1065,8 +1062,32 @@ mod tests {
         let settings = load_settings(&path, std::env::temp_dir());
         assert_eq!(settings.download_dir, saved);
         assert!(!settings.close_to_tray);
-        assert!(settings.show_artwork);
+        assert!(!settings.show_artwork);
         assert!(settings.auto_check_updates);
+    }
+
+    #[test]
+    fn artwork_is_off_without_readable_settings() {
+        let dir = tempfile_dir();
+        let missing = load_settings(&dir.join("no-such-settings.json"), std::env::temp_dir());
+        assert!(!missing.show_artwork);
+        let corrupt = dir.join("corrupt-settings.json");
+        std::fs::write(&corrupt, "{ not json").unwrap();
+        assert!(!load_settings(&corrupt, std::env::temp_dir()).show_artwork);
+    }
+
+    #[test]
+    fn artwork_stays_on_once_turned_on() {
+        let dir = tempfile_dir();
+        let path = dir.join("artwork-on-settings.json");
+        let json = serde_json::json!({
+            "downloadDir": dir,
+            "relay": { "mode": "default" },
+            "closeToTray": true,
+            "showArtwork": true,
+        });
+        std::fs::write(&path, json.to_string()).unwrap();
+        assert!(load_settings(&path, std::env::temp_dir()).show_artwork);
     }
 
     #[test]
