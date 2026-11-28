@@ -111,7 +111,8 @@ impl ShareLink {
     /// A direct link that also carries `addrs` (at most eight, IPv4 first).
     pub fn with_addrs(endpoint: EndpointId, token: ShareToken, addrs: &[SocketAddr]) -> Self {
         let mut addrs = addrs.to_vec();
-        addrs.sort_by_key(|a| (a.is_ipv6(), a.ip().is_loopback()));
+        // Sorted fully, so `dedup` sees every duplicate next to its twin.
+        addrs.sort_by_key(|a| (a.is_ipv6(), a.ip().is_loopback(), *a));
         addrs.dedup();
         addrs.truncate(MAX_ADDRS);
         Self::Direct {
@@ -479,6 +480,15 @@ mod tests {
         assert_eq!(ShareLink::parse(&link.to_url()).unwrap(), link);
         // The code names the share, not where it is.
         assert_eq!(link.code(), ShareLink::direct(endpoint, token).code());
+        // Duplicates go, wherever they are in the list.
+        let twice: Vec<SocketAddr> = ["10.0.0.1:1", "10.0.0.2:1", "10.0.0.1:1"]
+            .map(|a| a.parse().unwrap())
+            .to_vec();
+        let ShareLink::Direct { addrs: kept, .. } = ShareLink::with_addrs(endpoint, token, &twice)
+        else {
+            unreachable!()
+        };
+        assert_eq!(kept, twice[..2]);
         let many: Vec<SocketAddr> = (0..20)
             .map(|i| SocketAddr::from(([10, 0, 0, i], 1)))
             .collect();
