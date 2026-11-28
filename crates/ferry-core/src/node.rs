@@ -65,6 +65,8 @@ const GC_INTERVAL: Duration = Duration::from_secs(600);
 const IMPORT_PARALLELISM: usize = 4;
 /// How many file names a preview carries; the UI shows a few, the CLI up to 20.
 pub const PREVIEW_FILES: usize = 200;
+/// Password checks that may run at once (see `Inner::password_checks`).
+const PASSWORD_CHECKS: usize = 2;
 
 fn share_tag(hash: &Hash) -> String {
     format!("ferry/share/{}", hash.to_hex())
@@ -221,6 +223,9 @@ struct Inner {
     provider: Arc<ProviderState>,
     /// Limits password guesses per share.
     guesses: GuessLimiter,
+    /// Password checks running at once. Each one is memory-hard (about 19 MiB), so a burst of
+    /// guesses from many devices must not run them all together.
+    password_checks: Arc<tokio::sync::Semaphore>,
     events: broadcast::Sender<Event>,
     downloads: Mutex<HashMap<String, Running>>,
     next_op: AtomicU64,
@@ -363,6 +368,7 @@ impl Node {
                 share_ops: tokio::sync::Mutex::new(()),
                 provider,
                 guesses: GuessLimiter::default(),
+                password_checks: Arc::new(tokio::sync::Semaphore::new(PASSWORD_CHECKS)),
                 events,
                 downloads: Mutex::new(HashMap::new()),
                 next_op: AtomicU64::new(1),
@@ -492,7 +498,24 @@ impl Node {
     /// must not be modified or moved while shared. Empty folders, symlinks and OS junk files
     /// (`.DS_Store`, `Thumbs.db`, …) are skipped.
     pub async fn create_share(&self, paths: Vec<PathBuf>) -> anyhow::Result<ShareInfo> {
+        self.create_share_with_password(paths, None).await
+    }
+
+    /// Like [`Node::create_share`], with a password that recipients need (`None` keeps the
+    /// password a share of the same files already has). The password is in place before the
+    /// share is served, so nobody holding an earlier link to the same files gets in without it.
+    pub async fn create_share_with_password(
+        &self,
+        paths: Vec<PathBuf>,
+        password: Option<String>,
+    ) -> anyhow::Result<ShareInfo> {
         anyhow::ensure!(!paths.is_empty(), "nothing to share");
+        let hashed = match password {
+            Some(password) => {
+                Some(tokio::task::spawn_blocking(move || access::hash_password(&password)).await??)
+            }
+            None => None,
+        };
         let op_id = self.inner.next_op.fetch_add(1, Ordering::Relaxed);
 
         // Flatten the inputs into (collection name, absolute path, size, index of the item).
@@ -728,17 +751,27 @@ impl Node {
                 .access
                 .entry(share.id.clone())
                 .or_insert_with(ShareAccess::generate);
-            // Added to the devices let in already, not put in their place: sharing the same
-            // files again must not end the downloads of an open share's recipients, whose
-            // grants are kept only in memory.
-            for device in access.grants.iter().filter_map(|d| parse_device(d)) {
-                self.inner.provider.grant(hash, device);
+            if let Some(hashed) = &hashed {
+                // A new password: only devices that give it get in, as with `set_share_password`.
+                access.password = Some(hashed.clone());
+                access.grants.clear();
+                self.inner.provider.set_grants(hash, []);
+            } else {
+                // Added to the devices let in already, not put in their place: sharing the same
+                // files again must not end the downloads of an open share's recipients, whose
+                // grants are kept only in memory.
+                for device in access.grants.iter().filter_map(|d| parse_device(d)) {
+                    self.inner.provider.grant(hash, device);
+                }
             }
             self.inner.provider.allow(
                 hash,
                 share.total_size,
                 Some(files.iter().map(|f| f.size).collect()),
             );
+        }
+        if hashed.is_some() {
+            self.inner.guesses.reset(&share.id);
         }
         self.persist();
         let share = self.with_link(share);
@@ -862,9 +895,16 @@ impl Node {
                     retry_after_secs: wait.as_secs().max(1),
                 };
             }
-            let verified =
-                tokio::task::spawn_blocking(move || access::verify_password(&stored, &password))
-                    .await;
+            // The permit is held by the check itself, so a request that times out meanwhile
+            // can't free it while the hash is still being computed.
+            let Ok(permit) = self.inner.password_checks.clone().acquire_owned().await else {
+                return OpenResponse::Unavailable;
+            };
+            let verified = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                access::verify_password(&stored, &password)
+            })
+            .await;
             match verified {
                 Ok(Ok(true)) => self.inner.guesses.give_back(&id, remote),
                 Ok(Ok(false)) => {

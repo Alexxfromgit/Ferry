@@ -321,6 +321,52 @@ async fn sharing_the_same_files_again_keeps_running_downloads() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_password_given_when_sharing_is_needed_from_the_start() {
+    init_tracing();
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("notes.txt");
+    std::fs::write(&file, content(10_000, 2)).unwrap();
+    let sender = node(&tmp.path().join("sender")).await;
+    let receiver = node(&tmp.path().join("receiver")).await;
+    let access = |e: anyhow::Error| e.downcast_ref::<AccessError>().cloned();
+
+    // Shared openly and opened once, then turned off: the old link still names the share.
+    let open = sender.create_share(vec![file.clone()]).await.unwrap();
+    let link = ShareLink::parse(&open.link).unwrap();
+    receiver.preview(&link, None).await.unwrap();
+    sender.set_share_paused(&open.id, true).await.unwrap();
+
+    // Sharing the same files again with a password turns it on already locked: neither the
+    // old link nor the device let in before gets in without the password.
+    let locked = sender
+        .create_share_with_password(vec![file], Some("winter crossing".into()))
+        .await
+        .unwrap();
+    assert!(locked.locked);
+    assert_eq!(locked.code, open.code, "the same share");
+    let err = receiver.preview(&link, None).await.unwrap_err();
+    assert_eq!(access(err), Some(AccessError::PasswordRequired));
+    receiver
+        .preview(&link, Some("winter crossing".into()))
+        .await
+        .unwrap();
+
+    // A bad password is refused before anything is shared.
+    let other = tmp.path().join("other.txt");
+    std::fs::write(&other, b"other").unwrap();
+    assert!(
+        sender
+            .create_share_with_password(vec![other], Some("ab".into()))
+            .await
+            .is_err()
+    );
+    assert_eq!(sender.list_shares().len(), 1);
+
+    sender.shutdown().await.unwrap();
+    receiver.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_share_turned_off_is_refused_until_turned_on_again() {
     init_tracing();
     let tmp = tempfile::tempdir().unwrap();
