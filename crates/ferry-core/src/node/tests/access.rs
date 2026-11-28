@@ -78,3 +78,55 @@ async fn a_device_out_of_guesses_waits_even_with_the_right_password() {
 
     node.shutdown().await.unwrap();
 }
+
+/// A download resumed after the sender stopped letting this device in without the password
+/// asks for it again, without claiming why: a new password is one reason, a sender that
+/// remembers only so many devices per share another.
+#[tokio::test(flavor = "multi_thread")]
+async fn resuming_without_being_let_in_asks_for_the_password_again() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("secret.txt");
+    std::fs::write(&file, b"locked").unwrap();
+    let sender = Node::start(Config::local_only(tmp.path().join("sender")))
+        .await
+        .unwrap();
+    let share = sender
+        .create_share_with_password(vec![file], Some("spring tide".into()))
+        .await
+        .unwrap();
+
+    // A paused download of that share that this device was never let in for, as after the
+    // sender forgot it.
+    let receiver = Node::start(Config::local_only(tmp.path().join("receiver")))
+        .await
+        .unwrap();
+    let info: DownloadInfo = serde_json::from_value(serde_json::json!({
+        "id": share.id, "link": share.link, "destDir": tmp.path().join("dl"), "name": "secret.txt",
+        "status": "paused", "doneBytes": 0, "totalBytes": 6, "createdAt": 1,
+    }))
+    .unwrap();
+    receiver.inner.registry.lock().unwrap().downloads.push(info);
+    receiver.resume_download(&share.id).await.unwrap();
+
+    let failed = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(d) = receiver.download(&share.id)
+                && d.status == DownloadStatus::Failed
+            {
+                return d;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the download fails");
+    let error = failed.error.unwrap_or_default();
+    assert!(
+        error.contains("asks for the share's password again"),
+        "{error}"
+    );
+    assert!(!error.contains("  "), "one sentence: {error}");
+
+    sender.shutdown().await.unwrap();
+    receiver.shutdown().await.unwrap();
+}
