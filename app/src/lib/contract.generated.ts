@@ -123,6 +123,7 @@ export const downloads = [
   {
     "id": "b8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8de",
     "link": "https://ferry.xenvaultinteractive.com/s#AQ",
+    "relay": "https://relay.example.com/",
     "destDir": "/home/example/Downloads",
     "name": "Holiday",
     "status": "completed",
@@ -235,6 +236,7 @@ export const events = [
     "download": {
       "id": "b8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8deb8de",
       "link": "https://ferry.xenvaultinteractive.com/s#AQ",
+      "relay": "https://relay.example.com/",
       "destDir": "/home/example/Downloads",
       "name": "Holiday",
       "status": "downloading",

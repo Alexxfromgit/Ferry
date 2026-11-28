@@ -66,6 +66,8 @@ export interface DownloadInfo {
   id: string;
   /** The sender's link, used to reconnect when resuming. */
   link: string;
+  /** The sender's home relay from a short link's lookup, for resuming. */
+  relay?: string;
   destDir: string;
   name: string;
   status: DownloadStatus;

@@ -63,8 +63,10 @@ lower-case hex, and times are unix seconds. Integers in signed messages are big-
 - The service checks that `CODE` matches the derivation above and that the signature verifies.
   It caps `expires` at 31 days from now.
 - It answers `204`, or `409` if a live code already belongs to another share.
-- Ferry asks for 30 days and registers again every 12 hours while a share exists, so links
-  don't expire while you're sharing.
+- Ferry asks for 30 days and registers again every 12 hours while a share exists, turned off
+  or not, so links don't expire while you're sharing. A failed registration is tried again,
+  after two minutes at first and then less often, up to an hour. If refreshing keeps failing,
+  the share goes back to its full link a day before the code would expire.
 
 ### `GET /api/links/<CODE>`: look up
 
@@ -92,8 +94,8 @@ relay is ignored and the device is found through address lookup.
 
 A registration must carry a later `expires` than the code's last one, so an old registration
 replayed later can't roll a code back. Registrations and removals are limited to a few a minute
-per network, lookups to 60 a minute per address; Ferry paces its own requests to stay under
-that.
+per network, lookups to 60 a minute per address; Ferry sends its requests one at a time, at
+least 7 seconds apart, to stay under that.
 
 ## What the service sees
 
@@ -106,8 +108,10 @@ that.
   Cloudflare, which runs it, doesn't keep the addresses requested next to who requested them.
 
 If that matters to you, turn short links off and send full links instead. Turning them off in
-Settings also removes your existing short links from the service. A share removed while short
-links are off keeps its code until it expires (30 days at most).
+Settings also removes your existing short links from the service. Removals, also of shares
+you remove, are kept until the service confirms them: if it can't be reached, or Ferry quits
+first, they are sent on the next start, even with short links off. That is the only thing
+Ferry asks the service while short links are off.
 
 A code works like the link it stands for: whoever has it can ask the sender for the share.
 Locking the share with a password protects it in every form, as

@@ -28,7 +28,8 @@ struct Cli {
     #[arg(long, global = true, default_value = "default")]
     relay: String,
 
-    /// Don't use Ferry's link service: share full links only, and don't open short ones.
+    /// Share full links only, and don't open short ones. Ferry still asks its link service to
+    /// remove short links it registered before, when their shares are removed.
     #[arg(long, global = true)]
     no_short_links: bool,
 
@@ -96,9 +97,7 @@ async fn main() -> anyhow::Result<()> {
     relay.validate()?;
     let mut config = Config::new(data_dir);
     config.relay = relay.clone();
-    if cli.no_short_links {
-        config.links_service = None;
-    }
+    config.short_links = !cli.no_short_links;
     // A one-shot tool should not quietly continue old downloads in the background.
     config.resume_downloads = false;
     let node = Node::start(config).await?;

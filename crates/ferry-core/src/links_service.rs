@@ -182,11 +182,12 @@ impl LinkService {
             share_code(&endpoint, &token) == code,
             "the link service gave an answer that doesn't belong to this link"
         );
-        // The relay is used only if the device signed it: otherwise the service could steer
-        // recipients to a relay of its choosing. Without it, the device is still found through
-        // address lookup.
+        // The relay is used only if the device signed it, in a registration that still lasts:
+        // otherwise the service could steer recipients to a relay of its choosing, or to one
+        // the device stopped using. Without it, the device is still found through address
+        // lookup.
         let signed = match (&answer.sig, answer.expires) {
-            (Some(sig), Some(expires)) => {
+            (Some(sig), Some(expires)) if expires > crate::util::now_unix() => {
                 let message =
                     register_message(code, &endpoint, &token, answer.relay.as_deref(), expires);
                 hex::decode(sig)
@@ -308,6 +309,14 @@ pub(crate) mod tests {
         pub lie: Arc<Mutex<bool>>,
         /// Answer lookups with this relay instead of the signed one.
         pub swap_relay: Arc<Mutex<Option<String>>>,
+        /// Answer this many registrations and removals with 503 first.
+        pub fail_writes: Arc<Mutex<usize>>,
+        /// Answer every registration and removal with 503 (the service is down).
+        pub down: Arc<Mutex<bool>>,
+        /// Codes whose registration is always refused (409).
+        pub refuse: Arc<Mutex<std::collections::HashSet<String>>>,
+        /// When each registration or removal arrived.
+        pub writes: Arc<Mutex<Vec<std::time::Instant>>>,
     }
 
     impl MockService {
@@ -368,6 +377,17 @@ pub(crate) mod tests {
             let sig = bytes("sig")
                 .and_then(|b| <[u8; 64]>::try_from(b).ok())
                 .map(|b| Signature::from_bytes(&b));
+            if method != "GET" {
+                self.writes.lock().unwrap().push(std::time::Instant::now());
+                let mut fail = self.fail_writes.lock().unwrap();
+                if *self.down.lock().unwrap() || *fail > 0 {
+                    *fail = fail.saturating_sub(1);
+                    return (503, r#"{"error":"down"}"#.into());
+                }
+                if method == "PUT" && self.refuse.lock().unwrap().contains(&code) {
+                    return (409, r#"{"error":"taken"}"#.into());
+                }
+            }
             match method {
                 "GET" => match self.links.lock().unwrap().get(&code) {
                     Some(link) if *self.lie.lock().unwrap() => {
@@ -496,7 +516,7 @@ pub(crate) mod tests {
             Resolved {
                 endpoint: secret.public(),
                 token,
-                relay: Some(relay)
+                relay: Some(relay.clone())
             }
         );
 
@@ -504,6 +524,13 @@ pub(crate) mod tests {
         *mock.swap_relay.lock().unwrap() = Some("https://evil.example.com/".into());
         assert_eq!(service.resolve(&code).await.unwrap().relay, None);
         *mock.swap_relay.lock().unwrap() = None;
+
+        // A relay from a registration that ran out is left out too, though its signature holds.
+        service
+            .register(&secret, &token, Some(&relay), 1_000)
+            .await
+            .unwrap();
+        assert_eq!(service.resolve(&code).await.unwrap().relay, None);
 
         // A relay other than https is left out of the registration, not refused.
         let http_relay: RelayUrl = "http://10.0.0.5:3340".parse().unwrap();

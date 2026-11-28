@@ -46,7 +46,7 @@ use crate::{
     events::{ConnectionKind, Event},
     identity,
     link::{FileEntry, ShareLink, ShareToken},
-    links_service::{LINK_LIFETIME, LinkService},
+    links_service::LinkService,
     protocol::{self, OpenRequest, OpenResponse},
     provider::{self, ProviderState},
     registry::{
@@ -69,14 +69,6 @@ const GC_INTERVAL: Duration = Duration::from_secs(600);
 const IMPORT_PARALLELISM: usize = 4;
 /// How many file names a preview carries; the UI shows a few, the CLI up to 20.
 pub const PREVIEW_FILES: usize = 200;
-/// How often short links are registered again, so they never expire while a share exists.
-const LINK_REFRESH: Duration = Duration::from_secs(12 * 60 * 60);
-/// How soon a failed registration is tried again at first; the wait doubles up to an hour.
-const LINK_RETRY: Duration = Duration::from_secs(120);
-const LINK_RETRY_MAX: Duration = Duration::from_secs(60 * 60);
-/// The pause between registrations (and removals), so a device with many shares stays under the
-/// service's limit of 10 a minute per network, with room to spare for other devices there.
-const LINK_PACE: Duration = Duration::from_secs(7);
 /// Password checks that may run at once (see `Inner::password_checks`).
 const PASSWORD_CHECKS: usize = 2;
 
@@ -237,16 +229,21 @@ struct Inner {
     guesses: GuessLimiter,
     /// The short-link service, if short links are used.
     links: Option<LinkService>,
-    /// Short links were turned off while running: the service is no longer contacted.
+    /// Short links are off (from the start, or turned off while running): nothing is
+    /// registered or looked up, though codes registered before are still removed.
     links_off: AtomicBool,
-    /// Shares whose short code the link service knows, so their link can be the short one.
-    short_links: Mutex<HashSet<String>>,
+    /// What the link worker knows about the service (see `link_worker`).
+    link_state: Mutex<link_worker::LinkState>,
+    /// Wakes the link worker when there is something new to do.
+    links_wake: Arc<tokio::sync::Notify>,
+    /// Shutting down: the link worker sends what removals it can, then stops.
+    links_closing: AtomicBool,
+    /// The link worker, while it runs.
+    link_worker: Mutex<Option<AbortOnDropHandle<()>>>,
     /// Devices can be found without addresses in links (see [`Config::address_book`]).
     has_address_book: bool,
-    /// Tasks that hold only a weak reference to the node.
-    background: Mutex<Vec<AbortOnDropHandle<()>>>,
-    /// Requests to the link service that are under way; shutting down lets them finish.
-    link_jobs: Mutex<Vec<AbortOnDropHandle<()>>>,
+    /// Tasks that live as long as the node (the test address book watcher).
+    _background: Vec<AbortOnDropHandle<()>>,
     /// Password checks running at once. Each one is memory-hard (about 19 MiB), so a burst of
     /// guesses from many devices must not run them all together.
     password_checks: Arc<tokio::sync::Semaphore>,
@@ -415,11 +412,13 @@ impl Node {
                 provider,
                 guesses: GuessLimiter::default(),
                 links,
-                links_off: AtomicBool::new(false),
-                short_links: Mutex::new(HashSet::new()),
+                links_off: AtomicBool::new(!config.short_links),
+                link_state: Mutex::default(),
+                links_wake: Arc::default(),
+                links_closing: AtomicBool::new(false),
+                link_worker: Mutex::new(None),
                 has_address_book: config.address_book.is_some(),
-                background: Mutex::new(background),
-                link_jobs: Mutex::new(Vec::new()),
+                _background: background,
                 password_checks: Arc::new(tokio::sync::Semaphore::new(PASSWORD_CHECKS)),
                 events,
                 downloads: Mutex::new(HashMap::new()),
@@ -432,14 +431,7 @@ impl Node {
         if migrated || access_changed {
             node.persist();
         }
-        if node.short_links_on() {
-            let refresh = tokio::spawn(refresh_short_links(Arc::downgrade(&node.inner)));
-            node.inner
-                .background
-                .lock()
-                .unwrap()
-                .push(AbortOnDropHandle::new(refresh));
-        }
+        node.start_link_worker();
         for id in resume {
             tracing::info!(%id, "resuming download");
             node.spawn_download(id);
@@ -459,14 +451,6 @@ impl Node {
     /// Whether this node talks to the short-link service (to make short links and open them).
     pub fn uses_link_service(&self) -> bool {
         self.link_service().is_some()
-    }
-
-    /// The short-link service, unless short links are off.
-    fn link_service(&self) -> Option<&LinkService> {
-        self.inner
-            .links
-            .as_ref()
-            .filter(|_| !self.inner.links_off.load(Ordering::SeqCst))
     }
 
     /// Wait until the node is reachable through its relay (or the timeout passes).
@@ -520,11 +504,9 @@ impl Node {
     /// Stop serving and close the store. Active downloads resume on the next start.
     pub async fn shutdown(&self) -> anyhow::Result<()> {
         self.inner.downloads.lock().unwrap().clear();
-        // A short link being removed (or registered) gets a moment to reach the service.
-        let jobs = std::mem::take(&mut *self.inner.link_jobs.lock().unwrap());
-        tokio::time::timeout(Duration::from_secs(5), futures_buffered::join_all(jobs))
-            .await
-            .ok();
+        // Short links being removed get a moment to reach the service; the rest are saved and
+        // sent on the next start.
+        self.stop_link_worker().await;
         // Shutting down the router also shuts down the blobs protocol and with it the store.
         let router_closed =
             tokio::time::timeout(Duration::from_secs(3), self.inner.router.shutdown())
@@ -577,8 +559,7 @@ impl Node {
         if let Some(access) = access {
             let link = self.link_for(access.token);
             share.code = link.code();
-            let short = self.inner.short_links.lock().unwrap().contains(&share.id);
-            share.link = if short {
+            share.link = if self.short_links_on() && self.has_short_link(&share.id) {
                 ShareLink::Code(share.code.clone()).to_url()
             } else {
                 link.to_url()
@@ -586,168 +567,6 @@ impl Node {
             share.locked = access.password.is_some();
         }
         share
-    }
-
-    /// Register a share's short code with the link service, in the background. Once that
-    /// worked, the share's link is the short one and [`Event::ShareUpdated`] says so.
-    fn register_short_link(&self, id: String) {
-        if !self.short_links_on() {
-            return;
-        }
-        let node = Arc::downgrade(&self.inner);
-        let task = tokio::spawn(async move {
-            let Some(inner) = node.upgrade() else { return };
-            let node = Node { inner };
-            if let Err(e) = node.try_register_short_link(&id).await {
-                tracing::warn!(%id, "could not register a short link: {e:#}");
-            }
-        });
-        self.add_link_job(task);
-    }
-
-    async fn try_register_short_link(&self, id: &str) -> anyhow::Result<()> {
-        let Some(service) = self.link_service() else {
-            return Ok(());
-        };
-        let token = {
-            let registry = self.inner.registry.lock().unwrap();
-            match (registry.share(id), registry.access.get(id)) {
-                (Some(share), Some(access)) if !share.paused => access.token,
-                _ => return Ok(()),
-            }
-        };
-        // The home relay helps recipients find this device sooner; wait briefly for it.
-        if !matches!(self.inner.relay, RelayChoice::Disabled) {
-            self.wait_online(Duration::from_secs(10)).await;
-        }
-        let relay: Option<RelayUrl> = self.endpoint().addr().relay_urls().next().cloned();
-        let expires = util::now_unix() + LINK_LIFETIME.as_secs();
-        let secret = self.endpoint().secret_key();
-        let code = service
-            .register(secret, &token, relay.as_ref(), expires)
-            .await?;
-        // The share may have been removed while this was under way, and its code removed from
-        // the service before it arrived there. Checked and marked under the registry lock, which
-        // a removal also takes: either the removal comes after this and removes the code again,
-        // or this sees it and does so. Turning short links off works the same way.
-        let newly = {
-            let registry = self.inner.registry.lock().unwrap();
-            let still_shared = registry.access.get(id).is_some_and(|a| a.token == token)
-                && !self.inner.links_off.load(Ordering::SeqCst);
-            if still_shared {
-                Some(
-                    self.inner
-                        .short_links
-                        .lock()
-                        .unwrap()
-                        .insert(id.to_string()),
-                )
-            } else {
-                None
-            }
-        };
-        match newly {
-            None => service.delete(secret, &code, util::now_unix()).await?,
-            Some(true) => {
-                if let Some(share) = self.share(id) {
-                    self.emit(Event::ShareUpdated { share });
-                }
-            }
-            Some(false) => {}
-        }
-        Ok(())
-    }
-
-    /// Turn short links off or back on while running. Off: shares show their full links again,
-    /// nothing more is sent to the link service or looked up there, and the codes it has are
-    /// removed in the background (paced; shutting down gives them a few seconds). On again:
-    /// the shares are registered again. A node started without a link service can't turn them
-    /// on; that needs a restart.
-    pub fn set_short_links(&self, on: bool) {
-        let Some(service) = self.inner.links.clone() else {
-            return;
-        };
-        if self.inner.links_off.swap(!on, Ordering::SeqCst) == !on {
-            return;
-        }
-        let node = Arc::downgrade(&self.inner);
-        let task = if on {
-            let ids: Vec<String> = {
-                let registry = self.inner.registry.lock().unwrap();
-                registry
-                    .shares
-                    .iter()
-                    .filter(|s| !s.paused)
-                    .map(|s| s.id.clone())
-                    .collect()
-            };
-            tokio::spawn(async move {
-                for (i, id) in ids.into_iter().enumerate() {
-                    if i > 0 {
-                        tokio::time::sleep(LINK_PACE).await;
-                    }
-                    let Some(inner) = node.upgrade() else { return };
-                    let node = Node { inner };
-                    if let Err(e) = node.try_register_short_link(&id).await {
-                        tracing::warn!(%id, "could not register a short link: {e:#}");
-                    }
-                }
-            })
-        } else {
-            // Taken under the registry lock after the switch, so a registration finishing now
-            // either sees the switch and removes its own code, or is cleared here.
-            let (tokens, shown) = {
-                let registry = self.inner.registry.lock().unwrap();
-                let shown = std::mem::take(&mut *self.inner.short_links.lock().unwrap());
-                let tokens: Vec<ShareToken> = registry.access.values().map(|a| a.token).collect();
-                (tokens, shown)
-            };
-            for id in shown {
-                if let Some(share) = self.share(&id) {
-                    self.emit(Event::ShareUpdated { share });
-                }
-            }
-            let secret = self.endpoint().secret_key().clone();
-            tokio::spawn(async move {
-                for (i, token) in tokens.into_iter().enumerate() {
-                    if i > 0 {
-                        tokio::time::sleep(LINK_PACE).await;
-                    }
-                    let code = crate::link::share_code(&secret.public(), &token);
-                    if let Err(e) = service.delete(&secret, &code, util::now_unix()).await {
-                        tracing::warn!("could not remove a short link: {e:#}");
-                    }
-                }
-            })
-        };
-        self.add_link_job(task);
-    }
-
-    fn add_link_job(&self, task: tokio::task::JoinHandle<()>) {
-        let mut jobs = self.inner.link_jobs.lock().unwrap();
-        jobs.retain(|t| !t.is_finished());
-        jobs.push(AbortOnDropHandle::new(task));
-    }
-
-    /// Remove a share's short code from the link service, in the background.
-    /// The code may be registered from an earlier run even if it isn't marked yet, so it is
-    /// removed whenever short links are on; removing an unknown code does no harm.
-    fn forget_short_link(&self, id: &str, token: ShareToken) {
-        self.inner.short_links.lock().unwrap().remove(id);
-        if !self.short_links_on() {
-            return;
-        }
-        let Some(service) = self.link_service().cloned() else {
-            return;
-        };
-        let secret = self.endpoint().secret_key().clone();
-        let code = crate::link::share_code(&secret.public(), &token);
-        let task = tokio::spawn(async move {
-            if let Err(e) = service.delete(&secret, &code, util::now_unix()).await {
-                tracing::warn!("could not remove a short link: {e:#}");
-            }
-        });
-        self.add_link_job(task);
     }
 
     /// Share files and/or folders. Files are served from where they are (not copied), so they
@@ -1034,7 +853,7 @@ impl Node {
         self.emit(Event::ShareCreated {
             share: share.clone(),
         });
-        self.register_short_link(share.id.clone());
+        self.schedule_short_link(&share.id);
         Ok(share)
     }
 
@@ -1209,17 +1028,18 @@ impl Node {
         // Held to the end, so the same files shared again meanwhile can't lose their tag and
         // file list to this removal, or be followed by its `ShareRemoved`.
         let _ops = self.inner.share_ops.lock().await;
-        let removed_access = {
+        {
             // Serving is stopped under the registry lock, together with the registry change.
+            // The share's short code is queued for removal in the same change, so it is saved
+            // with it and removed even if this run ends first.
             let mut registry = self.inner.registry.lock().unwrap();
             anyhow::ensure!(registry.share(&id).is_some(), "unknown share");
             registry.shares.retain(|s| s.id != id);
-            let access = registry.access.remove(&id);
+            if let Some(access) = registry.access.remove(&id) {
+                let code = crate::link::share_code(&self.endpoint().id(), &access.token);
+                self.forget_short_link(&mut registry, &id, code);
+            }
             self.inner.provider.disallow(&hash);
-            access
-        };
-        if let Some(access) = removed_access {
-            self.forget_short_link(&id, access.token);
         }
         self.inner.guesses.reset(&id);
         self.persist();
@@ -1289,7 +1109,7 @@ impl Node {
         };
         let saved = self.try_persist();
         if !paused {
-            self.register_short_link(id.clone());
+            self.schedule_short_link(&id);
         }
         let updated = self.with_link(updated);
         self.emit(Event::ShareUpdated {
@@ -1479,7 +1299,7 @@ impl Node {
         let dest_dir = std::path::absolute(&dest_dir).context("invalid destination folder")?;
         // The download keeps the full link, so resuming needs no lookup.
         let (link, relay) = self.resolve(link).await?;
-        let (hash, _) = self.open_share(&link, relay, password).await?;
+        let (hash, _) = self.open_share(&link, relay.clone(), password).await?;
         let id = hash.to_hex().to_string();
         if self.is_running(&id) {
             return self
@@ -1497,6 +1317,7 @@ impl Node {
         let info = DownloadInfo {
             id: id.clone(),
             link: link.to_url(),
+            relay: relay.as_ref().map(|r| r.to_string()),
             dest_dir,
             name: String::new(),
             status: DownloadStatus::Connecting,
@@ -1683,7 +1504,11 @@ impl Node {
                 "this download was started by an older version of Ferry; open the link again"
             );
             let link = ShareLink::parse(&info.link)?;
-            let (served, addr) = self.open_share(&link, None, None).await.map_err(|e| {
+            let relay = info
+                .relay
+                .as_deref()
+                .and_then(|r| r.parse::<RelayUrl>().ok());
+            let (served, addr) = self.open_share(&link, relay, None).await.map_err(|e| {
                 if e.downcast_ref::<AccessError>().is_some() {
                     e.context("the sender changed the share's password; open the link again")
                 } else {
@@ -1855,50 +1680,6 @@ impl Node {
     }
 }
 
-/// Keep every short link registered: at start, then every [`LINK_REFRESH`]. Registrations are
-/// paced, and only the ones that failed are tried again, sooner at first and then less often.
-/// Stops when the node is gone.
-async fn refresh_short_links(node: Weak<Inner>) {
-    let mut retry: Option<(Vec<String>, Duration)> = None;
-    loop {
-        let Some(inner) = node.upgrade() else { return };
-        let node_now = Node { inner };
-        let ids: Vec<String> = match &retry {
-            Some((failed, _)) => failed.clone(),
-            None => node_now
-                .inner
-                .registry
-                .lock()
-                .unwrap()
-                .shares
-                .iter()
-                .filter(|s| !s.paused)
-                .map(|s| s.id.clone())
-                .collect(),
-        };
-        let mut failed = Vec::new();
-        for (i, id) in ids.into_iter().enumerate() {
-            if i > 0 {
-                tokio::time::sleep(LINK_PACE).await;
-            }
-            if let Err(e) = node_now.try_register_short_link(&id).await {
-                tracing::warn!(%id, "could not refresh a short link: {e:#}");
-                failed.push(id);
-            }
-        }
-        drop(node_now);
-        let wait = if failed.is_empty() {
-            retry = None;
-            LINK_REFRESH
-        } else {
-            let wait = retry.map_or(LINK_RETRY, |(_, last)| (last * 2).min(LINK_RETRY_MAX));
-            retry = Some((failed, wait));
-            wait
-        };
-        tokio::time::sleep(wait).await;
-    }
-}
-
 fn connection_kind(is_relay: bool) -> ConnectionKind {
     if is_relay {
         ConnectionKind::Relay
@@ -1989,6 +1770,8 @@ fn dunce_canonicalize(path: &Path) -> anyhow::Result<PathBuf> {
     }
     Ok(canonical)
 }
+
+mod link_worker;
 
 #[cfg(test)]
 mod tests {

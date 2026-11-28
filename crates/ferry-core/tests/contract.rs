@@ -61,6 +61,7 @@ fn download(status: DownloadStatus, full: bool) -> DownloadInfo {
     DownloadInfo {
         id: "b8de".repeat(16),
         link: "https://ferry.xenvaultinteractive.com/s#AQ".into(),
+        relay: full.then(|| "https://relay.example.com/".into()),
         dest_dir: PathBuf::from("/home/example/Downloads"),
         name: "Holiday".into(),
         status,
